@@ -1,4 +1,4 @@
-"""Local file template store and Vault session manager."""
+"""Local file multi-template store and Vault session manager."""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 import re
 import secrets
+import shutil
+from typing import Literal
 
 import cv2
 import numpy as np
@@ -15,6 +17,7 @@ import numpy as np
 from app import config
 
 USER_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+EnrollMode = Literal["replace", "append"]
 
 
 def _utc_now_iso() -> str:
@@ -32,6 +35,15 @@ def validate_user_id(user_id: str) -> str:
 
 
 @dataclass
+class TemplateSample:
+    """In-memory representation of one stored biometric sample."""
+
+    sample_index: int
+    skeleton: np.ndarray
+    enhanced_gray: np.ndarray | None = None
+
+
+@dataclass
 class UserRecord:
     """Metadata stored for an enrolled user."""
 
@@ -40,10 +52,12 @@ class UserRecord:
     skeleton_pixels: int
     created_at: str
     updated_at: str
+    sample_count: int = 1
+    samples: list[dict] | None = None
 
 
 class TemplateStore:
-    """Persists 256x256 binary palm skeletons as PNGs plus JSON user metadata."""
+    """Persists up to 3 256x256 palm samples (skeleton + CLAHE gray) per user."""
 
     def __init__(self, data_dir: Path | None = None) -> None:
         self.data_dir = data_dir or config.DATA_DIR
@@ -61,61 +75,192 @@ class TemplateStore:
         with self.users_file.open("w", encoding="utf-8") as fh:
             json.dump(users, fh, indent=2)
 
-    def _template_path(self, user_id: str) -> Path:
+    def _user_dir(self, user_id: str) -> Path:
+        return self.templates_dir / user_id
+
+    def _legacy_template_path(self, user_id: str) -> Path:
         return self.templates_dir / f"{user_id}.png"
+
+    def _sample_skel_path(self, user_id: str, idx: int) -> Path:
+        return self._user_dir(user_id) / f"sample_{idx}_skel.png"
+
+    def _sample_gray_path(self, user_id: str, idx: int) -> Path:
+        return self._user_dir(user_id) / f"sample_{idx}_gray.png"
 
     def save_template(
         self,
         user_id: str,
         display_name: str,
         skeleton: np.ndarray,
+        enhanced_gray: np.ndarray | None = None,
+        mode: EnrollMode = "replace",
     ) -> UserRecord:
         uid = validate_user_id(user_id)
         name = display_name.strip() or uid
-        path = self._template_path(uid)
-
-        ok = cv2.imwrite(str(path), skeleton)
-        if not ok:
-            raise RuntimeError(f"Failed to write template image for user '{uid}'.")
+        user_dir = self._user_dir(uid)
 
         users = self._read_users()
-        now = _utc_now_iso()
         existing = users.get(uid)
-        created_at = existing["created_at"] if existing else now
+        now = _utc_now_iso()
+
+        if mode == "replace" or existing is None:
+            if user_dir.exists():
+                shutil.rmtree(user_dir, ignore_errors=True)
+            legacy = self._legacy_template_path(uid)
+            if legacy.exists():
+                legacy.unlink()
+            samples_meta: list[dict] = []
+            sample_idx = 0
+            created_at = existing["created_at"] if existing else now
+        elif mode == "append":
+            samples_meta = list(existing.get("samples") or [])
+            if not samples_meta and self._legacy_template_path(uid).exists():
+                # Migrate legacy single-sample layout to folder layout before appending
+                legacy_skel = cv2.imread(
+                    str(self._legacy_template_path(uid)), cv2.IMREAD_GRAYSCALE
+                )
+                if legacy_skel is not None:
+                    user_dir.mkdir(parents=True, exist_ok=True)
+                    cv2.imwrite(str(self._sample_skel_path(uid, 0)), legacy_skel)
+                    self._legacy_template_path(uid).unlink()
+                    samples_meta.append(
+                        {
+                            "sample_index": 0,
+                            "skeleton_pixels": int(np.count_nonzero(legacy_skel)),
+                            "created_at": existing["created_at"],
+                        }
+                    )
+            if len(samples_meta) >= config.MAX_ENROLL_SAMPLES:
+                raise ValueError(
+                    f"Maximum {config.MAX_ENROLL_SAMPLES} samples reached for user '{uid}'. "
+                    "Use enroll_mode='replace' to reset."
+                )
+            sample_idx = len(samples_meta)
+            created_at = existing["created_at"]
+        else:
+            raise ValueError(f"Unsupported enroll_mode: {mode}")
+
+        user_dir.mkdir(parents=True, exist_ok=True)
+        skel_path = self._sample_skel_path(uid, sample_idx)
+        if not cv2.imwrite(str(skel_path), skeleton):
+            raise RuntimeError(f"Failed to write skeleton sample for user '{uid}'.")
+
+        if enhanced_gray is not None:
+            gray_path = self._sample_gray_path(uid, sample_idx)
+            if not cv2.imwrite(str(gray_path), enhanced_gray):
+                raise RuntimeError(f"Failed to write gray sample for user '{uid}'.")
+
+        px_count = int(np.count_nonzero(skeleton))
+        samples_meta.append(
+            {
+                "sample_index": sample_idx,
+                "skeleton_pixels": px_count,
+                "created_at": now,
+            }
+        )
+        avg_pixels = int(
+            round(sum(s["skeleton_pixels"] for s in samples_meta) / len(samples_meta))
+        )
+
         record = UserRecord(
             user_id=uid,
             display_name=name,
-            skeleton_pixels=int(np.count_nonzero(skeleton)),
+            skeleton_pixels=avg_pixels,
             created_at=created_at,
             updated_at=now,
+            sample_count=len(samples_meta),
+            samples=samples_meta,
         )
         users[uid] = asdict(record)
         self._write_users(users)
         return record
 
-    def get_template(self, user_id: str) -> tuple[UserRecord, np.ndarray] | None:
+    def get_user_record(self, user_id: str) -> UserRecord | None:
         uid = validate_user_id(user_id)
         users = self._read_users()
         raw = users.get(uid)
-        path = self._template_path(uid)
-        if raw is None or not path.exists():
+        if raw is None:
             return None
+        return UserRecord(
+            user_id=raw["user_id"],
+            display_name=raw["display_name"],
+            skeleton_pixels=raw["skeleton_pixels"],
+            created_at=raw["created_at"],
+            updated_at=raw["updated_at"],
+            sample_count=raw.get("sample_count", 1),
+            samples=raw.get("samples"),
+        )
 
-        skeleton = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
-        if skeleton is None:
-            return None
-        return UserRecord(**raw), skeleton
-
-    def get_template_bytes(self, user_id: str) -> bytes | None:
+    def get_user_samples(self, user_id: str) -> list[TemplateSample]:
         uid = validate_user_id(user_id)
-        path = self._template_path(uid)
-        if not path.exists():
+        record = self.get_user_record(uid)
+        if record is None:
+            return []
+
+        loaded: list[TemplateSample] = []
+        if record.samples:
+            for item in record.samples:
+                idx = int(item["sample_index"])
+                skel_path = self._sample_skel_path(uid, idx)
+                if not skel_path.exists():
+                    continue
+                skel = cv2.imread(str(skel_path), cv2.IMREAD_GRAYSCALE)
+                if skel is None:
+                    continue
+                gray_path = self._sample_gray_path(uid, idx)
+                gray = (
+                    cv2.imread(str(gray_path), cv2.IMREAD_GRAYSCALE)
+                    if gray_path.exists()
+                    else None
+                )
+                loaded.append(
+                    TemplateSample(
+                        sample_index=idx,
+                        skeleton=skel,
+                        enhanced_gray=gray,
+                    )
+                )
+
+        if not loaded and self._legacy_template_path(uid).exists():
+            skel = cv2.imread(str(self._legacy_template_path(uid)), cv2.IMREAD_GRAYSCALE)
+            if skel is not None:
+                loaded.append(TemplateSample(sample_index=0, skeleton=skel, enhanced_gray=None))
+
+        return loaded
+
+    def get_template(self, user_id: str) -> tuple[UserRecord, np.ndarray] | None:
+        """Backwards-compatible single-template getter (returns sample 0)."""
+        rec = self.get_user_record(user_id)
+        samples = self.get_user_samples(user_id)
+        if rec is None or not samples:
             return None
-        return path.read_bytes()
+        return rec, samples[0].skeleton
+
+    def get_template_bytes(self, user_id: str, sample_index: int = 0) -> bytes | None:
+        uid = validate_user_id(user_id)
+        path = self._sample_skel_path(uid, sample_index)
+        if path.exists():
+            return path.read_bytes()
+        if sample_index == 0 and self._legacy_template_path(uid).exists():
+            return self._legacy_template_path(uid).read_bytes()
+        return None
 
     def list_users(self) -> list[UserRecord]:
         users = self._read_users()
-        return [UserRecord(**item) for item in users.values()]
+        out: list[UserRecord] = []
+        for raw in users.values():
+            out.append(
+                UserRecord(
+                    user_id=raw["user_id"],
+                    display_name=raw["display_name"],
+                    skeleton_pixels=raw["skeleton_pixels"],
+                    created_at=raw["created_at"],
+                    updated_at=raw["updated_at"],
+                    sample_count=raw.get("sample_count", 1),
+                    samples=raw.get("samples"),
+                )
+            )
+        return out
 
     def delete_user(self, user_id: str) -> bool:
         uid = validate_user_id(user_id)
@@ -124,9 +269,13 @@ class TemplateStore:
         if existed:
             del users[uid]
             self._write_users(users)
-        path = self._template_path(uid)
-        if path.exists():
-            path.unlink()
+        user_dir = self._user_dir(uid)
+        if user_dir.exists():
+            shutil.rmtree(user_dir, ignore_errors=True)
+            existed = True
+        legacy = self._legacy_template_path(uid)
+        if legacy.exists():
+            legacy.unlink()
             existed = True
         return existed
 

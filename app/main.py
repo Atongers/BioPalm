@@ -28,7 +28,13 @@ from app.schemas import (
     VaultStatusResponse,
     VerifyResponse,
 )
-from app.storage.templates import TemplateStore, UserRecord, VaultSessionStore
+from app.storage.templates import (
+    EnrollMode,
+    TemplateSample,
+    TemplateStore,
+    UserRecord,
+    VaultSessionStore,
+)
 
 
 def _build_roi_box(
@@ -95,6 +101,7 @@ def _to_user_summary(rec: UserRecord) -> UserSummary:
         user_id=rec.user_id,
         display_name=rec.display_name,
         skeleton_pixels=rec.skeleton_pixels,
+        sample_count=rec.sample_count,
         created_at=rec.created_at,
         updated_at=rec.updated_at,
     )
@@ -183,12 +190,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         "/api/enroll",
         response_model=EnrollResponse,
         tags=["Biometric Auth"],
-        summary="Enroll a user's palmprint 1-px skeleton template",
+        summary="Enroll a user's palmprint template (replace or append up to 3 samples)",
     )
     async def enroll_user(
         user_id: Annotated[str, Form(description="Alphanumeric ID, e.g. 'fathan'")],
         file: Annotated[UploadFile, File(description="Palm image (PNG/JPEG)")],
         display_name: Annotated[str, Form()] = "",
+        enroll_mode: Annotated[EnrollMode, Form()] = "replace",
         crop_mode: Annotated[CropMode, Form()] = "auto_palm",
         roi_x: Annotated[int | None, Form()] = None,
         roi_y: Annotated[int | None, Form()] = None,
@@ -228,6 +236,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 user_id=user_id,
                 display_name=display_name or user_id,
                 skeleton=result.skeleton,
+                enhanced_gray=result.enhanced_gray,
+                mode=enroll_mode,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -237,6 +247,72 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             user=_to_user_summary(record),
             quality=_to_quality(result),
             stages=result.stages_b64,
+        )
+
+    @application.post(
+        "/api/enroll/multi",
+        response_model=EnrollResponse,
+        tags=["Biometric Auth"],
+        summary="Batch-enroll 1 to 3 palm samples for a user in a single request",
+    )
+    async def enroll_user_multi(
+        user_id: Annotated[str, Form(description="Alphanumeric ID, e.g. 'fathan'")],
+        files: Annotated[list[UploadFile], File(description="1 to 3 palm images (PNG/JPEG)")],
+        display_name: Annotated[str, Form()] = "",
+        crop_mode: Annotated[CropMode, Form()] = "auto_palm",
+        use_blackhat: Annotated[bool, Form()] = config.DEFAULT_USE_BLACKHAT,
+        clip_limit: Annotated[float, Form()] = config.CLAHE_CLIP_LIMIT,
+        median_ksize: Annotated[int, Form()] = config.MEDIAN_KSIZE,
+        block_size: Annotated[int, Form()] = config.ADAPTIVE_BLOCK_SIZE,
+        c_val: Annotated[int, Form()] = config.ADAPTIVE_C,
+        min_component_px: Annotated[int, Form(ge=0, le=200)] = config.MIN_COMPONENT_PIXELS,
+        include_stages: Annotated[bool, Form()] = True,
+    ) -> EnrollResponse:
+        if not files or len(files) > config.MAX_ENROLL_SAMPLES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Provide between 1 and {config.MAX_ENROLL_SAMPLES} palm images.",
+            )
+
+        last_result: PipelineResult | None = None
+        record: UserRecord | None = None
+        for idx, upload in enumerate(files):
+            image_bytes = await upload.read()
+            result = _run_pipeline(
+                image_bytes=image_bytes,
+                crop_mode=crop_mode,
+                roi_box=None,
+                use_blackhat=use_blackhat,
+                clip_limit=clip_limit,
+                median_ksize=median_ksize,
+                block_size=block_size,
+                c_val=c_val,
+                min_component_px=min_component_px,
+                include_stages=include_stages and (idx == len(files) - 1),
+            )
+            if result.skeleton_density < config.MIN_SKELETON_RATIO:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Sample #{idx + 1} has insufficient palm features.",
+                )
+            try:
+                record = template_store.save_template(
+                    user_id=user_id,
+                    display_name=display_name or user_id,
+                    skeleton=result.skeleton,
+                    enhanced_gray=result.enhanced_gray,
+                    mode="replace" if idx == 0 else "append",
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            last_result = result
+
+        assert record is not None and last_result is not None
+        return EnrollResponse(
+            enrolled=True,
+            user=_to_user_summary(record),
+            quality=_to_quality(last_result),
+            stages=last_result.stages_b64,
         )
 
     @application.post(
@@ -272,23 +348,24 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         min_component_px: Annotated[int, Form(ge=0, le=200)] = config.MIN_COMPONENT_PIXELS,
         include_stages: Annotated[bool, Form()] = True,
     ) -> VerifyResponse:
-        candidates: list[tuple[UserRecord, object]] = []
+        candidates: list[tuple[UserRecord, list[TemplateSample]]] = []
         if user_id and user_id.strip():
             try:
-                loaded = template_store.get_template(user_id.strip())
+                rec = template_store.get_user_record(user_id.strip())
+                samples = template_store.get_user_samples(user_id.strip())
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-            if loaded is None:
+            if rec is None or not samples:
                 raise HTTPException(
                     status_code=404,
                     detail=f"Enrolled user '{user_id}' not found.",
                 )
-            candidates.append(loaded)
+            candidates.append((rec, samples))
         else:
             for rec in template_store.list_users():
-                loaded = template_store.get_template(rec.user_id)
-                if loaded is not None:
-                    candidates.append(loaded)
+                samples = template_store.get_user_samples(rec.user_id)
+                if samples:
+                    candidates.append((rec, samples))
             if not candidates:
                 raise HTTPException(
                     status_code=404,
@@ -311,24 +388,27 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         )
 
         best_record: UserRecord | None = None
-        best_template = None
+        best_sample: TemplateSample | None = None
         best_match: MatchResult | None = None
+        total_samples_checked = 0
 
-        for rec, tmpl_skeleton in candidates:
-            m = compute_match_score(
-                probe_skeleton=result.skeleton,
-                template_skeleton=tmpl_skeleton,  # type: ignore[arg-type]
-                threshold=threshold,
-                dilation_ksize=dilation_ksize,
-                shift_range=shift_range,
-                enable_alignment=enable_alignment,
-            )
-            if best_match is None or m.score > best_match.score:
-                best_match = m
-                best_record = rec
-                best_template = tmpl_skeleton
+        for rec, samples in candidates:
+            for sample in samples:
+                total_samples_checked += 1
+                m = compute_match_score(
+                    probe_skeleton=result.skeleton,
+                    template_skeleton=sample.skeleton,
+                    threshold=threshold,
+                    dilation_ksize=dilation_ksize,
+                    shift_range=shift_range,
+                    enable_alignment=enable_alignment,
+                )
+                if best_match is None or m.score > best_match.score:
+                    best_match = m
+                    best_record = rec
+                    best_sample = sample
 
-        assert best_match is not None and best_record is not None
+        assert best_match is not None and best_record is not None and best_sample is not None
 
         vault_unlocked = False
         if best_match.verified and session_id and session_id.strip():
@@ -340,15 +420,15 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             vault_unlocked = unlocked is not None
 
         template_preview = (
-            encode_png_b64(best_template)  # type: ignore[arg-type]
-            if include_stages and best_template is not None
+            encode_png_b64(best_sample.skeleton)
+            if include_stages
             else None
         )
         overlay_b64 = None
-        if include_stages and best_template is not None:
+        if include_stages:
             overlay_img = render_alignment_overlay(
                 probe_skeleton=result.skeleton,
-                template_skeleton=best_template,  # type: ignore[arg-type]
+                template_skeleton=best_sample.skeleton,
                 shift_x=best_match.shift_x,
                 shift_y=best_match.shift_y,
                 dilation_ksize=dilation_ksize,
@@ -369,6 +449,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 dilation_ksize=dilation_ksize,
                 shift_x=best_match.shift_x,
                 shift_y=best_match.shift_y,
+                matched_sample_index=best_sample.sample_index,
+                samples_checked=total_samples_checked,
                 reason=best_match.reason,
             ),
             quality=_to_quality(result),
@@ -390,11 +472,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     @application.get(
         "/api/users/{user_id}/template",
         tags=["Users"],
-        summary="Download stored 1-px skeleton PNG for a user",
+        summary="Download stored 1-px skeleton PNG for a user sample",
     )
-    async def get_user_template(user_id: str) -> Response:
+    async def get_user_template(user_id: str, sample_index: int = 0) -> Response:
         try:
-            data = template_store.get_template_bytes(user_id)
+            data = template_store.get_template_bytes(user_id, sample_index=sample_index)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         if data is None:

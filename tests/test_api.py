@@ -108,3 +108,65 @@ def test_inspect_enroll_verify_and_vault_flow(tmp_path):
     assert client.post(f"/api/vault/lock/{sid}").json()["status"] == "locked"
     assert client.delete("/api/users/fathan").json()["deleted"] is True
     assert client.get("/api/users").json() == []
+
+
+def test_multi_sample_enrollment_append_and_batch(tmp_path):
+    from tests.test_pipeline import make_synthetic_full_hand
+
+    client = _client(tmp_path)
+    s0 = make_synthetic_full_hand(0.0, 1.0)
+    s1 = make_synthetic_full_hand(12.0, 0.95)
+    s2 = make_synthetic_full_hand(-10.0, 0.85)
+
+    r1 = client.post(
+        "/api/enroll",
+        files={"file": ("s0.png", s0, "image/png")},
+        data={"user_id": "multi_u", "enroll_mode": "replace", "crop_mode": "auto_palm"},
+    )
+    assert r1.status_code == 200
+    assert r1.json()["user"]["sample_count"] == 1
+
+    r2 = client.post(
+        "/api/enroll",
+        files={"file": ("s1.png", s1, "image/png")},
+        data={"user_id": "multi_u", "enroll_mode": "append", "crop_mode": "auto_palm"},
+    )
+    assert r2.status_code == 200
+    assert r2.json()["user"]["sample_count"] == 2
+
+    r3 = client.post(
+        "/api/enroll",
+        files={"file": ("s2.png", s2, "image/png")},
+        data={"user_id": "multi_u", "enroll_mode": "append", "crop_mode": "auto_palm"},
+    )
+    assert r3.status_code == 200
+    assert r3.json()["user"]["sample_count"] == 3
+
+    r4 = client.post(
+        "/api/enroll",
+        files={"file": ("s3.png", s0, "image/png")},
+        data={"user_id": "multi_u", "enroll_mode": "append", "crop_mode": "auto_palm"},
+    )
+    assert r4.status_code == 400
+
+    v_res = client.post(
+        "/api/verify",
+        files={"file": ("probe.png", make_synthetic_full_hand(13.0, 0.94), "image/png")},
+        data={"user_id": "multi_u", "crop_mode": "auto_palm"},
+    )
+    assert v_res.status_code == 200
+    v_body = v_res.json()
+    assert v_body["verified"] is True
+    assert v_body["match"]["samples_checked"] == 3
+
+    batch_res = client.post(
+        "/api/enroll/multi",
+        files=[
+            ("files", ("b0.png", s0, "image/png")),
+            ("files", ("b1.png", s1, "image/png")),
+            ("files", ("b2.png", s2, "image/png")),
+        ],
+        data={"user_id": "batch_u", "display_name": "Batch User", "crop_mode": "auto_palm"},
+    )
+    assert batch_res.status_code == 200
+    assert batch_res.json()["user"]["sample_count"] == 3

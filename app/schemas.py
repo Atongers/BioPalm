@@ -24,6 +24,8 @@ class MatchBreakdown(BaseModel):
     dilation_ksize: int
     shift_x: int = 0
     shift_y: int = 0
+    matched_sample_index: int = 0
+    samples_checked: int = 1
     reason: str
 
 
@@ -39,6 +41,7 @@ class UserSummary(BaseModel):
     user_id: str
     display_name: str
     skeleton_pixels: int
+    sample_count: int = 1
     created_at: str
     updated_at: str
 

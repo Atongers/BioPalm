@@ -268,22 +268,72 @@ document.getElementById("btn-inspect").addEventListener("click", async () => {
   document.getElementById("m-shift").textContent = "-";
 });
 
+const ENROLL_PROMPTS = [
+  "Enroll Sampel (1/3: Posisi Normal)",
+  "Enroll Sampel (2/3: Agak Miring)",
+  "Enroll Sampel (3/3: Jarak Berbeda)",
+];
+let cachedUsers = [];
+
+function updateEnrollWizardUI() {
+  const uid = userIdInput.value.trim();
+  const found = cachedUsers.find((u) => u.user_id === uid);
+  const count = found ? found.sample_count : 0;
+  const btn = document.getElementById("btn-enroll");
+  const hint = document.getElementById("enroll-wizard-hint");
+  if (count >= 3) {
+    btn.textContent = "Sampel Penuh (3/3)";
+    btn.disabled = true;
+    hint.textContent = `User '${uid}' sudah memiliki 3/3 sampel. Klik 'Reset Enroll' jika ingin daftar ulang.`;
+  } else {
+    btn.disabled = false;
+    btn.textContent = ENROLL_PROMPTS[count] || ENROLL_PROMPTS[0];
+    hint.textContent = `Progres '${uid || "user"}': ${count}/3 sampel tersimpan.`;
+  }
+}
+
+userIdInput.addEventListener("input", updateEnrollWizardUI);
+
 document.getElementById("btn-enroll").addEventListener("click", async () => {
   const uid = userIdInput.value.trim();
   if (!uid) {
     showError("Isi User ID terlebih dahulu untuk Enroll.");
     return;
   }
+  const found = cachedUsers.find((u) => u.user_id === uid);
+  const mode = found && found.sample_count > 0 ? "append" : "replace";
   const data = await callEndpoint("/api/enroll", (form) => {
     form.append("user_id", uid);
     form.append("display_name", displayNameInput.value.trim() || uid);
+    form.append("enroll_mode", mode);
   });
   if (!data) return;
   updateQualityAndStages(data.quality, data.stages);
   setAuthBox(
     "auth-ok",
-    `TERDAFTAR: ${data.user.display_name}`,
-    `User ID '${data.user.user_id}' tersimpan (${data.user.skeleton_pixels} piksel skeleton).`
+    `TERDAFTAR (${data.user.sample_count}/3): ${data.user.display_name}`,
+    `User ID '${data.user.user_id}' tersimpan (${data.user.sample_count}/3 sampel, rata-rata ${data.user.skeleton_pixels} px).`
+  );
+  await refreshUsers();
+});
+
+document.getElementById("btn-enroll-reset").addEventListener("click", async () => {
+  const uid = userIdInput.value.trim();
+  if (!uid) {
+    showError("Isi User ID terlebih dahulu untuk Reset Enroll.");
+    return;
+  }
+  const data = await callEndpoint("/api/enroll", (form) => {
+    form.append("user_id", uid);
+    form.append("display_name", displayNameInput.value.trim() || uid);
+    form.append("enroll_mode", "replace");
+  });
+  if (!data) return;
+  updateQualityAndStages(data.quality, data.stages);
+  setAuthBox(
+    "auth-ok",
+    `RESET ENROLL (1/3): ${data.user.display_name}`,
+    `Sampel user '${data.user.user_id}' di-reset dan disimpan ulang (1/3).`
   );
   await refreshUsers();
 });
@@ -313,10 +363,11 @@ document.getElementById("btn-verify").addEventListener("click", async () => {
 
   if (data.verified) {
     const who = data.matched_user ? `${data.matched_user.display_name} (${data.matched_user.user_id})` : "-";
+    const sampleNote = `Sampel #${data.match.matched_sample_index + 1}/${data.match.samples_checked}`;
     const vaultMsg = data.vault_unlocked ? " | Vault Lintas Perangkat TERBUKA!" : "";
-    setAuthBox("auth-ok", `TERVERIFIKASI (${data.match.score_percent}%)`, `User: ${who}${vaultMsg}`);
+    setAuthBox("auth-ok", `TERVERIFIKASI (${data.match.score_percent}%)`, `User: ${who} | ${sampleNote}${vaultMsg}`);
   } else {
-    setAuthBox("auth-fail", `DITOLAK (${data.match.score_percent}%)`, `Alasan: ${data.match.reason}`);
+    setAuthBox("auth-fail", `DITOLAK (${data.match.score_percent}%)`, `Alasan: ${data.match.reason} (cek ${data.match.samples_checked} sampel)`);
   }
 });
 
@@ -324,6 +375,8 @@ async function refreshUsers() {
   const res = await fetch("/api/users");
   if (!res.ok) return;
   const users = await res.json();
+  cachedUsers = users;
+  updateEnrollWizardUI();
   const ul = document.getElementById("users-list");
   ul.innerHTML = "";
   if (users.length === 0) {
@@ -333,7 +386,7 @@ async function refreshUsers() {
   users.forEach((u) => {
     const li = document.createElement("li");
     li.innerHTML = `
-      <span><strong>${u.user_id}</strong> (${u.display_name}) — ${u.skeleton_pixels} px</span>
+      <span><strong>${u.user_id}</strong> (${u.display_name}) — ${u.sample_count}/3 sampel, ${u.skeleton_pixels} px</span>
       <span class="button-row" style="margin:0">
         <a href="/api/users/${encodeURIComponent(u.user_id)}/template" target="_blank" class="btn btn-small btn-secondary">Skeleton</a>
         <button data-del="${u.user_id}" class="btn btn-small btn-danger">Hapus</button>
