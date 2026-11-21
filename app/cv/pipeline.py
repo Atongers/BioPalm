@@ -30,6 +30,7 @@ class PipelineResult:
     """Outputs and diagnostics from stages 1 through 5."""
 
     skeleton: np.ndarray
+    enhanced_gray: np.ndarray
     elapsed_ms: float
     mean_brightness: float
     lighting_status: str
@@ -115,29 +116,30 @@ def enhance_and_smooth(
     clip_limit: float = config.CLAHE_CLIP_LIMIT,
     median_ksize: int = config.MEDIAN_KSIZE,
     gaussian_ksize: int = config.GAUSSIAN_KSIZE,
-    use_blackhat: bool = False,
-) -> np.ndarray:
-    """Stage 3 (Materi 2 & 3): Median + optional Black-Hat + CLAHE + light Gaussian."""
+    use_blackhat: bool = config.DEFAULT_USE_BLACKHAT,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Stage 3 (Materi 2, 3 & 6): Median -> CLAHE -> optional Black-Hat after CLAHE."""
     k = median_ksize if median_ksize % 2 == 1 else median_ksize + 1
     k = max(3, k)
-    work = cv2.medianBlur(gray_256, k)
+    smoothed = cv2.medianBlur(gray_256, k)
 
+    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=config.CLAHE_TILE_GRID)
+    clahe_gray = clahe.apply(smoothed)
+
+    gk = gaussian_ksize if gaussian_ksize % 2 == 1 else gaussian_ksize + 1
     if use_blackhat:
         bh_kernel = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (config.BLACKHAT_KSIZE, config.BLACKHAT_KSIZE)
         )
-        blackhat = cv2.morphologyEx(work, cv2.MORPH_BLACKHAT, bh_kernel)
-        # Subtracting black-hat deepens dark palm lines under harsh lighting
-        # while keeping dark-lines-on-bright-skin polarity for thresholding.
-        work = cv2.subtract(work, blackhat)
+        blackhat = cv2.morphologyEx(clahe_gray, cv2.MORPH_BLACKHAT, bh_kernel)
+        if gk >= 3:
+            blackhat = cv2.GaussianBlur(blackhat, (gk, gk), 0)
+        ridge_input = cv2.bitwise_not(blackhat)
+        return clahe_gray, ridge_input
 
-    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=config.CLAHE_TILE_GRID)
-    clahe_img = clahe.apply(work)
-
-    if gaussian_ksize >= 3:
-        gk = gaussian_ksize if gaussian_ksize % 2 == 1 else gaussian_ksize + 1
-        return cv2.GaussianBlur(clahe_img, (gk, gk), 0)
-    return clahe_img
+    if gk >= 3:
+        return clahe_gray, cv2.GaussianBlur(clahe_gray, (gk, gk), 0)
+    return clahe_gray, clahe_gray
 
 
 def binarize_adaptive(
@@ -250,7 +252,7 @@ def process_palm_image(
     image_bytes: bytes,
     crop_mode: CropMode = "center_square",
     roi_box: RoiBox | None = None,
-    use_blackhat: bool = False,
+    use_blackhat: bool = config.DEFAULT_USE_BLACKHAT,
     clip_limit: float = config.CLAHE_CLIP_LIMIT,
     median_ksize: int = config.MEDIAN_KSIZE,
     block_size: int = config.ADAPTIVE_BLOCK_SIZE,
@@ -271,8 +273,8 @@ def process_palm_image(
     # Stage 2: Resize 256x256 bilinear
     resized_256 = resize_bilinear(green_roi, size=config.IMAGE_SIZE)
 
-    # Stage 3: Median + optional Black-Hat + CLAHE + Gaussian
-    enhanced = enhance_and_smooth(
+    # Stage 3: Median -> CLAHE -> optional Black-Hat after CLAHE
+    enhanced_gray, ridge_input = enhance_and_smooth(
         resized_256,
         clip_limit=clip_limit,
         median_ksize=median_ksize,
@@ -280,7 +282,7 @@ def process_palm_image(
     )
 
     # Stage 4: Adaptive Gaussian Thresholding
-    binary = binarize_adaptive(enhanced, block_size=block_size, c_val=c_val)
+    binary = binarize_adaptive(ridge_input, block_size=block_size, c_val=c_val)
 
     # Stage 5: Morphology Opening, Closing, Thinning, and fragment filtering
     cleaned, skeleton = clean_and_thin(binary, min_component_px=min_component_px)
@@ -294,7 +296,7 @@ def process_palm_image(
         stages_b64 = {
             "stage1_green_roi": encode_png_b64(green_roi),
             "stage2_resized_256": encode_png_b64(resized_256),
-            "stage3_clahe_median": encode_png_b64(enhanced),
+            "stage3_clahe_median": encode_png_b64(ridge_input),
             "stage4_adaptive_binary": encode_png_b64(binary),
             "stage5a_morph_clean": encode_png_b64(cleaned),
             "stage5b_skeleton_1px": encode_png_b64(skeleton),
@@ -302,6 +304,7 @@ def process_palm_image(
 
     return PipelineResult(
         skeleton=skeleton,
+        enhanced_gray=enhanced_gray,
         elapsed_ms=elapsed_ms,
         mean_brightness=round(mean_brightness, 2),
         lighting_status=lighting_status,

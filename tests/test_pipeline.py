@@ -57,6 +57,8 @@ def test_pipeline_outputs_binary_256_skeleton_and_stages():
 
     assert res.skeleton.shape == (256, 256)
     assert res.skeleton.dtype == np.uint8
+    assert res.enhanced_gray.shape == (256, 256)
+    assert res.enhanced_gray.dtype == np.uint8
     assert set(np.unique(res.skeleton).tolist()).issubset({0, 255})
     assert res.skeleton_pixels > 100
     assert res.elapsed_ms >= 0.0
@@ -168,4 +170,26 @@ def test_noisy_shifted_palm_aligns_and_rejects_different_palm():
     )
     assert diff_match.verified is False
     assert diff_match.score < 0.80
+
+
+def test_blackhat_after_clahe_survives_strong_shadow_gradient():
+    enroll_res = process_palm_image(make_synthetic_palm("A"), crop_mode="full")
+
+    raw = cv2.imdecode(
+        np.frombuffer(make_synthetic_palm("A"), np.uint8),
+        cv2.IMREAD_COLOR,
+    ).astype(np.float32)
+    h, w = raw.shape[:2]
+    shadow = np.linspace(-65.0, 45.0, w, dtype=np.float32)[None, :, None]
+    shadowed = np.clip(raw + shadow, 15, 250).astype(np.uint8)
+    ok, buf = cv2.imencode(".png", shadowed)
+    assert ok
+
+    probe_res = process_palm_image(buf.tobytes(), crop_mode="full", use_blackhat=True)
+    match = compute_match_score(
+        probe_skeleton=probe_res.skeleton,
+        template_skeleton=enroll_res.skeleton,
+    )
+    assert match.verified is True
+    assert match.score >= 0.80
 
