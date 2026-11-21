@@ -63,6 +63,7 @@ def test_pipeline_outputs_binary_256_skeleton_and_stages():
     assert res.skeleton_pixels > 100
     assert res.elapsed_ms >= 0.0
     assert set(res.stages_b64.keys()) == {
+        "stage0_roi_alignment",
         "stage1_green_roi",
         "stage2_resized_256",
         "stage3_clahe_median",
@@ -175,6 +176,7 @@ def test_noisy_shifted_palm_aligns_and_rejects_different_palm():
 def test_blackhat_after_clahe_survives_strong_shadow_gradient():
     enroll_res = process_palm_image(make_synthetic_palm("A"), crop_mode="full")
 
+    # Apply harsh uneven left-to-right shadow gradient on probe
     raw = cv2.imdecode(
         np.frombuffer(make_synthetic_palm("A"), np.uint8),
         cv2.IMREAD_COLOR,
@@ -192,4 +194,81 @@ def test_blackhat_after_clahe_survives_strong_shadow_gradient():
     )
     assert match.verified is True
     assert match.score >= 0.80
+
+
+def make_synthetic_full_hand(
+    angle_deg: float = 0.0,
+    scale: float = 1.0,
+    variant: str = "A",
+) -> bytes:
+    """Create a synthetic open hand on a non-skin dark desk background."""
+    h, w = 480, 480
+    canvas = np.full((h, w, 3), (45, 50, 55), dtype=np.uint8)
+    skin = (135, 175, 215)  # BGR inside YCrCb + HSV skin range
+
+    # Base upright hand centered around (240, 290)
+    hand = np.zeros_like(canvas)
+    # Palm body
+    cv2.ellipse(hand, (240, 295), (72, 85), 0, 0, 360, skin, -1)
+    # Four fingers (index, middle, ring, pinky) with realistic webbing gaps
+    fingers = [
+        ((178, 228), (165, 112), 13),  # index
+        ((218, 214), (218, 92), 13),   # middle
+        ((258, 216), (266, 102), 13),  # ring
+        ((296, 234), (314, 136), 11),  # pinky
+    ]
+    for base, tip, r in fingers:
+        cv2.line(hand, base, tip, skin, thickness=r * 2)
+    # Thumb out to the left
+    cv2.line(hand, (175, 320), (118, 250), skin, thickness=26)
+
+    # Principal palm lines on the palm body
+    if variant == "A":
+        lines = [
+            np.array([[195, 248], [225, 290], [238, 345]]),
+            np.array([[195, 265], [242, 278], [288, 295]]),
+            np.array([[215, 240], [255, 248], [292, 260]]),
+        ]
+    else:
+        lines = [
+            np.array([[285, 245], [250, 295], [210, 345]]),
+            np.array([[195, 330], [245, 305], [290, 280]]),
+            np.array([[200, 285], [245, 260], [285, 242]]),
+        ]
+    for pts in lines:
+        cv2.polylines(hand, [pts], isClosed=False, color=(55, 70, 90), thickness=4)
+
+    mask = np.any(hand > 0, axis=2)
+    canvas[mask] = hand[mask]
+
+    if angle_deg != 0.0 or scale != 1.0:
+        mat = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), angle_deg, scale)
+        canvas = cv2.warpAffine(
+            canvas, mat, (w, h), flags=cv2.INTER_LINEAR, borderValue=(45, 50, 55)
+        )
+
+    ok, buf = cv2.imencode(".png", canvas)
+    assert ok
+    return buf.tobytes()
+
+
+def test_auto_palm_valley_alignment_handles_tilt_and_scale():
+    enroll_res = process_palm_image(make_synthetic_full_hand(0.0, 1.0), crop_mode="auto_palm")
+    probe_res = process_palm_image(make_synthetic_full_hand(15.0, 0.85), crop_mode="auto_palm")
+
+    assert enroll_res.alignment_method == "finger_valleys"
+    assert probe_res.alignment_method == "finger_valleys"
+
+    match = compute_match_score(
+        probe_skeleton=probe_res.skeleton,
+        template_skeleton=enroll_res.skeleton,
+    )
+    assert match.verified is True
+    assert match.score >= 0.80
+
+
+def test_auto_palm_falls_back_to_center_square_when_no_skin_found():
+    res = process_palm_image(make_blank_image(), crop_mode="auto_palm")
+    assert res.alignment_method == "fallback_center_square"
+
 

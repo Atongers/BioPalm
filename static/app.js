@@ -67,17 +67,30 @@ function showError(msg) {
 async function captureWebcamRoi() {
   const vw = video.videoWidth;
   const vh = video.videoHeight;
+  const mode = cropModeSelect.value;
+
+  const ctx = captureCanvas.getContext("2d");
+  if (mode === "auto_palm") {
+    captureCanvas.width = vw;
+    captureCanvas.height = vh;
+    ctx.drawImage(video, 0, 0, vw, vh);
+    const blob = await new Promise((resolve) =>
+      captureCanvas.toBlob(resolve, "image/png")
+    );
+    return { blob, filename: "webcam_full.png", cropMode: "auto_palm", allowOverride: true };
+  }
+
+  captureCanvas.width = 256;
+  captureCanvas.height = 256;
   const side = Math.floor(Math.min(vw, vh) * 0.65);
   const sx = Math.floor((vw - side) / 2);
   const sy = Math.floor((vh - side) / 2);
-
-  const ctx = captureCanvas.getContext("2d");
   ctx.drawImage(video, sx, sy, side, side, 0, 0, 256, 256);
 
   const blob = await new Promise((resolve) =>
     captureCanvas.toBlob(resolve, "image/png")
   );
-  return { blob, filename: "webcam_roi.png", cropMode: "full" };
+  return { blob, filename: "webcam_roi.png", cropMode: "full", allowOverride: false };
 }
 
 document.getElementById("btn-start-cam").addEventListener("click", async () => {
@@ -152,7 +165,10 @@ fileInput.addEventListener("change", () => {
 
 async function getInputBlobAndCropMode() {
   if (useSnapshotInput.checked && lastSnapshot) {
-    return lastSnapshot;
+    return {
+      ...lastSnapshot,
+      cropMode: lastSnapshot.allowOverride ? cropModeSelect.value : lastSnapshot.cropMode,
+    };
   }
 
   if (mediaStream && video.videoWidth > 0 && !video.hidden) {
@@ -166,13 +182,17 @@ async function getInputBlobAndCropMode() {
       blob: selectedFile,
       filename: selectedFile.name,
       cropMode: cropModeSelect.value,
+      allowOverride: true,
     };
     lastSnapshot = snap;
     return snap;
   }
 
   if (lastSnapshot) {
-    return lastSnapshot;
+    return {
+      ...lastSnapshot,
+      cropMode: lastSnapshot.allowOverride ? cropModeSelect.value : lastSnapshot.cropMode,
+    };
   }
 
   throw new Error("Aktifkan webcam atau unggah gambar telapak tangan terlebih dahulu.");
@@ -180,7 +200,7 @@ async function getInputBlobAndCropMode() {
 
 function updateQualityAndStages(quality, stages, templateB64 = null, overlayB64 = null) {
   const lightBadge = document.getElementById("lighting-badge");
-  lightBadge.textContent = `Cahaya: ${quality.lighting_status} (${quality.mean_brightness})`;
+  lightBadge.textContent = `Cahaya: ${quality.lighting_status} (${quality.mean_brightness}) | ROI: ${quality.alignment_method}`;
   lightBadge.className = "pill " + (
     quality.lighting_status === "ok" ? "pill-ok" : "pill-warn"
   );
@@ -189,6 +209,7 @@ function updateQualityAndStages(quality, stages, templateB64 = null, overlayB64 
   document.getElementById("m-pixels").textContent = quality.skeleton_pixels;
 
   if (stages) {
+    document.getElementById("img-s0").src = stages.stage0_roi_alignment || "";
     document.getElementById("img-s1").src = stages.stage1_green_roi || "";
     document.getElementById("img-s2").src = stages.stage2_resized_256 || "";
     document.getElementById("img-s3").src = stages.stage3_clahe_median || "";

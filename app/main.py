@@ -81,6 +81,7 @@ def _run_pipeline(
 
 def _to_quality(res: PipelineResult) -> QualityMetrics:
     return QualityMetrics(
+        alignment_method=res.alignment_method,
         elapsed_ms=res.elapsed_ms,
         mean_brightness=res.mean_brightness,
         lighting_status=res.lighting_status,
@@ -147,7 +148,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     )
     async def inspect_pipeline(
         file: Annotated[UploadFile, File(description="Palm image (PNG/JPEG)")],
-        crop_mode: Annotated[CropMode, Form()] = "center_square",
+        crop_mode: Annotated[CropMode, Form()] = "auto_palm",
         roi_x: Annotated[int | None, Form()] = None,
         roi_y: Annotated[int | None, Form()] = None,
         roi_w: Annotated[int | None, Form()] = None,
@@ -188,7 +189,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         user_id: Annotated[str, Form(description="Alphanumeric ID, e.g. 'fathan'")],
         file: Annotated[UploadFile, File(description="Palm image (PNG/JPEG)")],
         display_name: Annotated[str, Form()] = "",
-        crop_mode: Annotated[CropMode, Form()] = "center_square",
+        crop_mode: Annotated[CropMode, Form()] = "auto_palm",
         roi_x: Annotated[int | None, Form()] = None,
         roi_y: Annotated[int | None, Form()] = None,
         roi_w: Annotated[int | None, Form()] = None,
@@ -258,7 +259,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         dilation_ksize: Annotated[int, Form(ge=1, le=21)] = config.DEFAULT_DILATION_KSIZE,
         shift_range: Annotated[int, Form(ge=0, le=30)] = config.DEFAULT_SHIFT_RANGE,
         enable_alignment: Annotated[bool, Form()] = True,
-        crop_mode: Annotated[CropMode, Form()] = "center_square",
+        crop_mode: Annotated[CropMode, Form()] = "auto_palm",
         roi_x: Annotated[int | None, Form()] = None,
         roi_y: Annotated[int | None, Form()] = None,
         roi_w: Annotated[int | None, Form()] = None,

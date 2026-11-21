@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 
 class QualityMetrics(BaseModel):
+    alignment_method: str = Field(..., description="finger_valleys | fallback_center_square | center_square | full | box")
     elapsed_ms: float = Field(..., description="Total CV pipeline processing time (ms).")
     mean_brightness: float = Field(..., description="Mean ROI green-channel brightness (0-255).")
     lighting_status: str = Field(..., description="ok | too_dark | overexposed")

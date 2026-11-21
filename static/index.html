@@ -57,9 +57,10 @@
           <input type="text" id="display-name" placeholder="mis. Fathan Ridho" />
         </label>
         <label>
-          Crop Mode (untuk Upload)
+          Crop Mode
           <select id="crop-mode">
-            <option value="center_square" selected>center_square (otomatis 75% tengah)</option>
+            <option value="auto_palm" selected>auto_palm (Deteksi Sela Jari + Rotasi)</option>
+            <option value="center_square">center_square (75% tengah)</option>
             <option value="full">full (gambar sudah ROI)</option>
           </select>
         </label>
@@ -174,6 +175,7 @@
       <span class="hint">256×256 Skeletonization &amp; Template Comparison</span>
     </div>
     <div class="stages-grid" id="stages-grid">
+      <div class="stage-item"><h4>0. Auto-ROI Sela Jari (M6 &amp; M7)</h4><img id="img-s0" alt="Stage 0" /></div>
       <div class="stage-item"><h4>1. Green Channel (M1)</h4><img id="img-s1" alt="Stage 1" /></div>
       <div class="stage-item"><h4>2. ROI 256×256 Bilinear (M4)</h4><img id="img-s2" alt="Stage 2" /></div>
       <div class="stage-item"><h4>3. CLAHE + Median 5×5 (M2/M3)</h4><img id="img-s3" alt="Stage 3" /></div>
