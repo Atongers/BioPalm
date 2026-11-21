@@ -65,6 +65,14 @@
           </select>
         </label>
         <label>
+          Matcher Mode (Tahap 6)
+          <select id="matcher-mode">
+            <option value="hybrid" selected>hybrid (Dilated IoU + ORB Keypoints)</option>
+            <option value="dilated_iou">dilated_iou (Skeleton Toleran)</option>
+            <option value="orb">orb (Keypoint ORB CLAHE)</option>
+          </select>
+        </label>
+        <label>
           Vault Session ID (opsional)
           <input type="text" id="session-id-input" placeholder="tempel session_id" />
         </label>
@@ -135,7 +143,7 @@
 
       <div class="metrics-row" id="match-metrics">
         <div><span>Dilated IoU</span><strong id="m-iou">-</strong></div>
-        <div><span>Dice F1</span><strong id="m-dice">-</strong></div>
+        <div><span>ORB Score</span><strong id="m-orb">-</strong></div>
         <div><span>Shift (dx,dy)</span><strong id="m-shift">-</strong></div>
         <div><span>Skeleton Px</span><strong id="m-pixels">-</strong></div>
       </div>
@@ -188,6 +196,7 @@
       <div class="stage-item"><h4>5b. Skeleton 1 px (M6)</h4><img id="img-s5b" alt="Stage 5b" /></div>
       <div class="stage-item"><h4>Template Database (Verify)</h4><img id="img-tmpl" alt="Stored Template" /></div>
       <div class="stage-item"><h4>Overlay Alignment (Cyan=Probe, Ungu=Tmpl, Putih=Cocok)</h4><img id="img-overlay" alt="Alignment Overlay" /></div>
+      <div class="stage-item"><h4>ORB Keypoint Matches (Bab 6)</h4><img id="img-orb" alt="ORB Matches" /></div>
     </div>
   </section>
 

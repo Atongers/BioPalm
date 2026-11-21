@@ -11,7 +11,13 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import config
-from app.cv.matcher import MatchResult, compute_match_score, render_alignment_overlay
+from app.cv.matcher import (
+    MatcherMode,
+    MatchResult,
+    compute_match_score,
+    render_alignment_overlay,
+    render_orb_matches,
+)
 from app.cv.pipeline import (
     CropMode,
     PipelineResult,
@@ -332,6 +338,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             Form(description="Optional Vault session_id to unlock on success."),
         ] = None,
         threshold: Annotated[float, Form(ge=0.0, le=1.0)] = config.DEFAULT_THRESHOLD,
+        matcher_mode: Annotated[MatcherMode, Form()] = config.DEFAULT_MATCHER_MODE,  # type: ignore[assignment]
         dilation_ksize: Annotated[int, Form(ge=1, le=21)] = config.DEFAULT_DILATION_KSIZE,
         shift_range: Annotated[int, Form(ge=0, le=30)] = config.DEFAULT_SHIFT_RANGE,
         enable_alignment: Annotated[bool, Form()] = True,
@@ -398,6 +405,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 m = compute_match_score(
                     probe_skeleton=result.skeleton,
                     template_skeleton=sample.skeleton,
+                    probe_gray=result.enhanced_gray,
+                    template_gray=sample.enhanced_gray,
+                    matcher_mode=matcher_mode,
                     threshold=threshold,
                     dilation_ksize=dilation_ksize,
                     shift_range=shift_range,
@@ -425,6 +435,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             else None
         )
         overlay_b64 = None
+        orb_b64 = None
         if include_stages:
             overlay_img = render_alignment_overlay(
                 probe_skeleton=result.skeleton,
@@ -434,6 +445,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 dilation_ksize=dilation_ksize,
             )
             overlay_b64 = encode_png_b64(overlay_img)
+            if best_sample.enhanced_gray is not None:
+                orb_img = render_orb_matches(result.enhanced_gray, best_sample.enhanced_gray)
+                orb_b64 = encode_png_b64(orb_img)
 
         return VerifyResponse(
             verified=best_match.verified,
@@ -442,9 +456,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             match=MatchBreakdown(
                 score=best_match.score,
                 score_percent=round(best_match.score * 100.0, 2),
+                matcher_mode=best_match.matcher_mode,
                 dilated_iou=best_match.dilated_iou,
                 dice_f1=best_match.dice_f1,
                 hamming_similarity=best_match.hamming_similarity,
+                orb_score=best_match.orb_score,
+                orb_good_matches=best_match.orb_good_matches,
                 threshold=threshold,
                 dilation_ksize=dilation_ksize,
                 shift_x=best_match.shift_x,
@@ -456,6 +473,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             quality=_to_quality(result),
             template_preview_b64=template_preview,
             alignment_overlay_b64=overlay_b64,
+            orb_matches_b64=orb_b64,
             stages=result.stages_b64,
             vault_unlocked=vault_unlocked,
         )

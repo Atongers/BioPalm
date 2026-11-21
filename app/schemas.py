@@ -15,11 +15,14 @@ class QualityMetrics(BaseModel):
 
 
 class MatchBreakdown(BaseModel):
-    score: float = Field(..., description="Primary verification score (Dilated IoU, 0.0-1.0).")
+    score: float = Field(..., description="Primary verification score (0.0-1.0).")
     score_percent: float = Field(..., description="Verification score percentage (0-100).")
+    matcher_mode: str = "hybrid"
     dilated_iou: float
     dice_f1: float
     hamming_similarity: float
+    orb_score: float = 0.0
+    orb_good_matches: int = 0
     threshold: float
     dilation_ksize: int
     shift_x: int = 0
@@ -61,6 +64,7 @@ class VerifyResponse(BaseModel):
     quality: QualityMetrics
     template_preview_b64: str | None = None
     alignment_overlay_b64: str | None = None
+    orb_matches_b64: str | None = None
     stages: dict[str, str] = Field(default_factory=dict)
     vault_unlocked: bool = False
 

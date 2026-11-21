@@ -272,3 +272,60 @@ def test_auto_palm_falls_back_to_center_square_when_no_skin_found():
     assert res.alignment_method == "fallback_center_square"
 
 
+def test_orb_and_hybrid_matching_modes():
+    from app.cv.matcher import render_orb_matches
+
+    # Add textured micro-creases on palm so ORB keypoints are abundant
+    rng = np.random.default_rng(7)
+    raw_a = cv2.imdecode(
+        np.frombuffer(make_synthetic_full_hand(0.0, 1.0, variant="A"), np.uint8),
+        cv2.IMREAD_COLOR,
+    )
+    raw_b = cv2.imdecode(
+        np.frombuffer(make_synthetic_full_hand(0.0, 1.0, variant="B"), np.uint8),
+        cv2.IMREAD_COLOR,
+    )
+    ok_a, buf_a = cv2.imencode(".png", raw_a)
+    ok_b, buf_b = cv2.imencode(".png", raw_b)
+    assert ok_a and ok_b
+
+    enroll_res = process_palm_image(buf_a.tobytes(), crop_mode="auto_palm")
+    probe_same = process_palm_image(make_synthetic_full_hand(12.0, 0.90, variant="A"), crop_mode="auto_palm")
+    probe_diff = process_palm_image(buf_b.tobytes(), crop_mode="auto_palm")
+
+    orb_same = compute_match_score(
+        probe_skeleton=probe_same.skeleton,
+        template_skeleton=enroll_res.skeleton,
+        probe_gray=probe_same.enhanced_gray,
+        template_gray=enroll_res.enhanced_gray,
+        matcher_mode="orb",
+        threshold=0.70,
+    )
+    assert orb_same.matcher_mode == "orb"
+    assert orb_same.orb_good_matches > 5
+
+    hybrid_same = compute_match_score(
+        probe_skeleton=probe_same.skeleton,
+        template_skeleton=enroll_res.skeleton,
+        probe_gray=probe_same.enhanced_gray,
+        template_gray=enroll_res.enhanced_gray,
+        matcher_mode="hybrid",
+        threshold=0.75,
+    )
+    assert hybrid_same.matcher_mode == "hybrid"
+    assert hybrid_same.verified is True
+
+    hybrid_diff = compute_match_score(
+        probe_skeleton=probe_diff.skeleton,
+        template_skeleton=enroll_res.skeleton,
+        probe_gray=probe_diff.enhanced_gray,
+        template_gray=enroll_res.enhanced_gray,
+        matcher_mode="hybrid",
+        threshold=0.75,
+    )
+    assert hybrid_diff.verified is False
+    assert hybrid_diff.score < hybrid_same.score
+
+    vis_orb = render_orb_matches(probe_same.enhanced_gray, enroll_res.enhanced_gray)
+    assert vis_orb.shape[0] == 256 and vis_orb.shape[1] == 512
+

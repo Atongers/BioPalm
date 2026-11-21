@@ -118,6 +118,7 @@ def test_multi_sample_enrollment_append_and_batch(tmp_path):
     s1 = make_synthetic_full_hand(12.0, 0.95)
     s2 = make_synthetic_full_hand(-10.0, 0.85)
 
+    # Sequential append enrollment up to 3 samples
     r1 = client.post(
         "/api/enroll",
         files={"file": ("s0.png", s0, "image/png")},
@@ -142,6 +143,7 @@ def test_multi_sample_enrollment_append_and_batch(tmp_path):
     assert r3.status_code == 200
     assert r3.json()["user"]["sample_count"] == 3
 
+    # 4th append should be rejected cleanly with HTTP 400
     r4 = client.post(
         "/api/enroll",
         files={"file": ("s3.png", s0, "image/png")},
@@ -149,16 +151,25 @@ def test_multi_sample_enrollment_append_and_batch(tmp_path):
     )
     assert r4.status_code == 400
 
+    # Verify picks highest score across all 3 stored samples (including hybrid + ORB visual)
     v_res = client.post(
         "/api/verify",
         files={"file": ("probe.png", make_synthetic_full_hand(13.0, 0.94), "image/png")},
-        data={"user_id": "multi_u", "crop_mode": "auto_palm"},
+        data={
+            "user_id": "multi_u",
+            "crop_mode": "auto_palm",
+            "matcher_mode": "hybrid",
+            "threshold": "0.75",
+        },
     )
     assert v_res.status_code == 200
     v_body = v_res.json()
     assert v_body["verified"] is True
     assert v_body["match"]["samples_checked"] == 3
+    assert v_body["match"]["matcher_mode"] == "hybrid"
+    assert v_body["orb_matches_b64"].startswith("data:image/png;base64,")
 
+    # Batch multi-enroll endpoint
     batch_res = client.post(
         "/api/enroll/multi",
         files=[

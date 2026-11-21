@@ -1,13 +1,16 @@
-"""Stage 6 feature matching with shift alignment between 256x256 palmprint skeletons."""
+"""Stage 6 feature matching: Dilated IoU + Shift Alignment + ORB Keypoints."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import cv2
 import numpy as np
 
 from app import config
+
+MatcherMode = Literal["dilated_iou", "orb", "hybrid"]
 
 
 @dataclass(frozen=True)
@@ -22,6 +25,9 @@ class MatchResult:
     shift_x: int
     shift_y: int
     reason: str
+    matcher_mode: str = "dilated_iou"
+    orb_score: float = 0.0
+    orb_good_matches: int = 0
 
 
 def _shift_bool(mask: np.ndarray, dx: int, dy: int) -> np.ndarray:
@@ -96,16 +102,66 @@ def _find_best_alignment(
     return best_dx, best_dy
 
 
+def compute_orb_matches(
+    probe_gray: np.ndarray,
+    template_gray: np.ndarray,
+) -> tuple[float, int, tuple[cv2.KeyPoint, ...], tuple[cv2.KeyPoint, ...], list[cv2.DMatch]]:
+    """Extract ORB keypoints on 256x256 CLAHE grayscale ROIs and match via Lowe ratio + RANSAC."""
+    orb = cv2.ORB_create(
+        nfeatures=config.ORB_NFEATURES,
+        fastThreshold=config.ORB_FAST_THRESHOLD,
+    )
+    kp1, des1 = orb.detectAndCompute(probe_gray, None)
+    kp2, des2 = orb.detectAndCompute(template_gray, None)
+
+    if (
+        des1 is None
+        or des2 is None
+        or len(kp1) < 2
+        or len(kp2) < 2
+        or len(des1) < 2
+        or len(des2) < 2
+    ):
+        return 0.0, 0, kp1 or (), kp2 or (), []
+
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+    knn = bf.knnMatch(des1, des2, k=2)
+
+    good: list[cv2.DMatch] = []
+    for pair in knn:
+        if len(pair) == 2:
+            m, n = pair
+            if m.distance < config.ORB_RATIO_THRESH * n.distance:
+                good.append(m)
+
+    effective = good
+    if len(good) >= 8:
+        src_pts = np.float32([kp1[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
+        dst_pts = np.float32([kp2[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
+        _, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 6.0)
+        if mask is not None:
+            inliers = [m for m, keep in zip(good, mask.ravel().tolist()) if keep]
+            effective = inliers
+
+    effective.sort(key=lambda m: m.distance)
+    denom = max(12.0, min(len(kp1), len(kp2)) * 0.25)
+    orb_score = min(1.0, len(effective) / denom)
+    return round(float(orb_score), 4), len(effective), kp1, kp2, effective
+
+
 def compute_match_score(
     probe_skeleton: np.ndarray,
     template_skeleton: np.ndarray,
+    probe_gray: np.ndarray | None = None,
+    template_gray: np.ndarray | None = None,
+    matcher_mode: MatcherMode = config.DEFAULT_MATCHER_MODE,  # type: ignore[assignment]
     threshold: float = config.DEFAULT_THRESHOLD,
     dilation_ksize: int = config.DEFAULT_DILATION_KSIZE,
     shift_range: int = config.DEFAULT_SHIFT_RANGE,
     shift_step: int = config.DEFAULT_SHIFT_STEP,
     enable_alignment: bool = True,
 ) -> MatchResult:
-    """Compare two 256x256 binary skeletons with dilation & translation alignment."""
+    """Compare probe and template using Dilated IoU, ORB keypoints, or Hybrid fusion."""
     if probe_skeleton.shape != template_skeleton.shape:
         raise ValueError(
             f"Shape mismatch: probe={probe_skeleton.shape} template={template_skeleton.shape}"
@@ -128,6 +184,9 @@ def compute_match_score(
             shift_x=0,
             shift_y=0,
             reason="insufficient_palm_features",
+            matcher_mode=matcher_mode,
+            orb_score=0.0,
+            orb_good_matches=0,
         )
 
     k = max(1, dilation_ksize)
@@ -154,7 +213,26 @@ def compute_match_score(
     aligned_probe = _shift_bool(probe_bool, best_dx, best_dy)
     dilated_iou, dice_f1, hamming_sim = _iou_metrics(aligned_probe, tmpl_bool)
 
-    score = round(dilated_iou, 4)
+    orb_score = 0.0
+    orb_good = 0
+    has_grays = probe_gray is not None and template_gray is not None
+    if matcher_mode in ("orb", "hybrid") and has_grays:
+        orb_score, orb_good, _, _, _ = compute_orb_matches(
+            probe_gray, template_gray  # type: ignore[arg-type]
+        )
+
+    effective_mode = matcher_mode
+    if matcher_mode == "orb" and has_grays:
+        score = orb_score
+    elif matcher_mode == "hybrid" and has_grays:
+        score = round(
+            config.HYBRID_IOU_WEIGHT * dilated_iou + config.HYBRID_ORB_WEIGHT * orb_score,
+            4,
+        )
+    else:
+        effective_mode = "dilated_iou"
+        score = round(dilated_iou, 4)
+
     verified = score >= threshold
     reason = "matched" if verified else "below_threshold"
 
@@ -167,6 +245,9 @@ def compute_match_score(
         shift_x=best_dx,
         shift_y=best_dy,
         reason=reason,
+        matcher_mode=effective_mode,
+        orb_score=orb_score,
+        orb_good_matches=orb_good,
     )
 
 
@@ -200,3 +281,21 @@ def render_alignment_overlay(
     canvas[only_probe] = (255, 255, 0)  # BGR Cyan
     canvas[overlap] = (255, 255, 255)   # BGR White
     return canvas
+
+
+def render_orb_matches(
+    probe_gray: np.ndarray,
+    template_gray: np.ndarray,
+    max_draw: int = 40,
+) -> np.ndarray:
+    """Render side-by-side ORB keypoint match visualization for Layar 2 Inspector."""
+    _, _, kp1, kp2, matches = compute_orb_matches(probe_gray, template_gray)
+    return cv2.drawMatches(
+        probe_gray,
+        kp1,
+        template_gray,
+        kp2,
+        matches[:max_draw],
+        None,
+        flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS,
+    )

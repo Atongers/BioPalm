@@ -21,6 +21,7 @@ const claheInput = document.getElementById("clahe-clip");
 const claheVal = document.getElementById("clahe-val");
 
 const cropModeSelect = document.getElementById("crop-mode");
+const matcherModeSelect = document.getElementById("matcher-mode");
 const useBlackhatInput = document.getElementById("use-blackhat");
 const useSnapshotInput = document.getElementById("use-snapshot");
 
@@ -71,6 +72,7 @@ async function captureWebcamRoi() {
 
   const ctx = captureCanvas.getContext("2d");
   if (mode === "auto_palm") {
+    // Send full webcam frame so Skin Segmentation & Finger Valley Detection see all fingers.
     captureCanvas.width = vw;
     captureCanvas.height = vh;
     ctx.drawImage(video, 0, 0, vw, vh);
@@ -198,7 +200,13 @@ async function getInputBlobAndCropMode() {
   throw new Error("Aktifkan webcam atau unggah gambar telapak tangan terlebih dahulu.");
 }
 
-function updateQualityAndStages(quality, stages, templateB64 = null, overlayB64 = null) {
+function updateQualityAndStages(
+  quality,
+  stages,
+  templateB64 = null,
+  overlayB64 = null,
+  orbMatchesB64 = null
+) {
   const lightBadge = document.getElementById("lighting-badge");
   lightBadge.textContent = `Cahaya: ${quality.lighting_status} (${quality.mean_brightness}) | ROI: ${quality.alignment_method}`;
   lightBadge.className = "pill " + (
@@ -219,6 +227,7 @@ function updateQualityAndStages(quality, stages, templateB64 = null, overlayB64 
   }
   document.getElementById("img-tmpl").src = templateB64 || "";
   document.getElementById("img-overlay").src = overlayB64 || "";
+  document.getElementById("img-orb").src = orbMatchesB64 || "";
 }
 
 function setAuthBox(stateClass, title, meta) {
@@ -264,7 +273,7 @@ document.getElementById("btn-inspect").addEventListener("click", async () => {
     `Density skeleton: ${(data.quality.skeleton_density * 100).toFixed(2)}% | Proses ${data.quality.elapsed_ms} ms`
   );
   document.getElementById("m-iou").textContent = "-";
-  document.getElementById("m-dice").textContent = "-";
+  document.getElementById("m-orb").textContent = "-";
   document.getElementById("m-shift").textContent = "-";
 });
 
@@ -344,6 +353,7 @@ document.getElementById("btn-verify").addEventListener("click", async () => {
     const sid = sessionIdInput.value.trim();
     if (uid) form.append("user_id", uid);
     if (sid) form.append("session_id", sid);
+    form.append("matcher_mode", matcherModeSelect.value);
     form.append("threshold", String(Number(thresholdInput.value) / 100));
     form.append("dilation_ksize", dilationInput.value);
     form.append("shift_range", shiftInput.value);
@@ -355,10 +365,11 @@ document.getElementById("btn-verify").addEventListener("click", async () => {
     data.quality,
     data.stages,
     data.template_preview_b64,
-    data.alignment_overlay_b64
+    data.alignment_overlay_b64,
+    data.orb_matches_b64
   );
-  document.getElementById("m-iou").textContent = `${data.match.score_percent}%`;
-  document.getElementById("m-dice").textContent = `${(data.match.dice_f1 * 100).toFixed(1)}%`;
+  document.getElementById("m-iou").textContent = `${(data.match.dilated_iou * 100).toFixed(1)}%`;
+  document.getElementById("m-orb").textContent = `${(data.match.orb_score * 100).toFixed(0)}% (${data.match.orb_good_matches})`;
   document.getElementById("m-shift").textContent = `(${data.match.shift_x}, ${data.match.shift_y})`;
 
   if (data.verified) {
