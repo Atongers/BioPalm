@@ -344,18 +344,20 @@ def enhance_and_smooth(
     gaussian_ksize: int = config.GAUSSIAN_KSIZE,
     use_blackhat: bool = config.DEFAULT_USE_BLACKHAT,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Stage 3 (Materi 2, 3 & 6): Median -> CLAHE -> optional Black-Hat after CLAHE.
-
-    Returns (clahe_gray, ridge_input):
-    - clahe_gray: 256x256 CLAHE-equalized grayscale image (used for ORB matching).
-    - ridge_input: smoothed image with dark palm valleys ready for adaptive thresholding.
-    """
+    """Stage 3 (Materi 2, 3 & 6): Median -> Bilateral -> CLAHE -> optional Black-Hat."""
     k = median_ksize if median_ksize % 2 == 1 else median_ksize + 1
     k = max(3, k)
-    smoothed = cv2.medianBlur(gray_256, k)
+    median_img = cv2.medianBlur(gray_256, k)
+
+    bilateral_img = cv2.bilateralFilter(
+        median_img,
+        config.BILATERAL_D,
+        config.BILATERAL_SIGMA_COLOR,
+        config.BILATERAL_SIGMA_SPACE,
+    )
 
     clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=config.CLAHE_TILE_GRID)
-    clahe_gray = clahe.apply(smoothed)
+    clahe_gray = clahe.apply(bilateral_img)
 
     gk = gaussian_ksize if gaussian_ksize % 2 == 1 else gaussian_ksize + 1
     if use_blackhat:
@@ -365,10 +367,7 @@ def enhance_and_smooth(
         blackhat = cv2.morphologyEx(clahe_gray, cv2.MORPH_BLACKHAT, bh_kernel)
         if gk >= 3:
             blackhat = cv2.GaussianBlur(blackhat, (gk, gk), 0)
-        # Invert black-hat ridges so palm lines remain dark valleys on a flat bright
-        # background (~255), stripping slow lighting gradients before thresholding.
-        ridge_input = cv2.bitwise_not(blackhat)
-        return clahe_gray, ridge_input
+        return clahe_gray, blackhat
 
     if gk >= 3:
         return clahe_gray, cv2.GaussianBlur(clahe_gray, (gk, gk), 0)
@@ -379,8 +378,21 @@ def binarize_adaptive(
     enhanced: np.ndarray,
     block_size: int = config.ADAPTIVE_BLOCK_SIZE,
     c_val: int = config.ADAPTIVE_C,
+    use_blackhat: bool = False,
 ) -> np.ndarray:
-    """Stage 4 (Materi 7): Adaptive Gaussian Thresholding (lines=255, skin=0)."""
+    """Stage 4 (Materi 7): Otsu+Floor on Black-Hat ridges, or Adaptive Gaussian fallback."""
+    if use_blackhat:
+        otsu_thresh, _ = cv2.threshold(
+            enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+        )
+        ridge_floor = max(
+            config.BLACKHAT_MIN_FLOOR,
+            config.BLACKHAT_MIN_FLOOR + (c_val - config.ADAPTIVE_C),
+        )
+        final_thresh = max(float(otsu_thresh), float(ridge_floor))
+        _, binary = cv2.threshold(enhanced, final_thresh, 255, cv2.THRESH_BINARY)
+        return binary
+
     blk = block_size if block_size % 2 == 1 else block_size + 1
     blk = max(3, blk)
     return cv2.adaptiveThreshold(
@@ -521,8 +533,10 @@ def process_palm_image(
         use_blackhat=use_blackhat,
     )
 
-    # Stage 4: Adaptive Gaussian Thresholding
-    binary = binarize_adaptive(ridge_input, block_size=block_size, c_val=c_val)
+    # Stage 4: Otsu + Floor (when Black-Hat active) or Adaptive Gaussian Thresholding
+    binary = binarize_adaptive(
+        ridge_input, block_size=block_size, c_val=c_val, use_blackhat=use_blackhat
+    )
 
     # Stage 5: Morphology Opening, Closing, Thinning, and fragment filtering
     cleaned, skeleton = clean_and_thin(binary, min_component_px=min_component_px)
@@ -533,11 +547,12 @@ def process_palm_image(
 
     stages_b64: dict[str, str] = {}
     if include_stages:
+        stage3_vis = cv2.bitwise_not(ridge_input) if use_blackhat else ridge_input
         stages_b64 = {
             "stage0_roi_alignment": encode_png_b64(vis_alignment) if vis_alignment is not None else "",
             "stage1_green_roi": encode_png_b64(green_roi),
             "stage2_resized_256": encode_png_b64(resized_256),
-            "stage3_clahe_median": encode_png_b64(ridge_input),
+            "stage3_clahe_median": encode_png_b64(stage3_vis),
             "stage4_adaptive_binary": encode_png_b64(binary),
             "stage5a_morph_clean": encode_png_b64(cleaned),
             "stage5b_skeleton_1px": encode_png_b64(skeleton),

@@ -329,3 +329,29 @@ def test_orb_and_hybrid_matching_modes():
     vis_orb = render_orb_matches(probe_same.enhanced_gray, enroll_res.enhanced_gray)
     assert vis_orb.shape[0] == 256 and vis_orb.shape[1] == 512
 
+
+def test_bilateral_and_otsu_blackhat_suppress_heavy_webcam_pores():
+    rng = np.random.default_rng(99)
+    enroll_res = process_palm_image(make_synthetic_palm("A"), crop_mode="full")
+
+    raw = cv2.imdecode(
+        np.frombuffer(make_synthetic_palm("A"), np.uint8),
+        cv2.IMREAD_COLOR,
+    ).astype(np.float32)
+    grain = rng.normal(0, 10.0, raw.shape)
+    noisy = np.clip(raw + grain, 0, 255).astype(np.uint8)
+    for _ in range(250):
+        px, py = int(rng.integers(8, 312)), int(rng.integers(8, 312))
+        cv2.circle(noisy, (px, py), 1, (105, 130, 155), -1)
+    ok, buf = cv2.imencode(".png", noisy)
+    assert ok
+
+    probe_res = process_palm_image(buf.tobytes(), crop_mode="full", use_blackhat=True)
+    assert probe_res.skeleton_density < 0.05
+    match = compute_match_score(
+        probe_skeleton=probe_res.skeleton,
+        template_skeleton=enroll_res.skeleton,
+    )
+    assert match.verified is True
+    assert match.score >= 0.80
+

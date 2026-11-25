@@ -71,29 +71,48 @@ async function captureWebcamRoi() {
   const vh = video.videoHeight;
   const mode = cropModeSelect.value;
 
-  const ctx = captureCanvas.getContext("2d");
-  if (mode === "auto_palm") {
-    // Send full webcam frame so Skin Segmentation & Finger Valley Detection see all fingers.
-    captureCanvas.width = vw;
-    captureCanvas.height = vh;
-    ctx.drawImage(video, 0, 0, vw, vh);
-    const blob = await new Promise((resolve) =>
-      captureCanvas.toBlob(resolve, "image/png")
-    );
-    return { blob, filename: "webcam_full.png", cropMode: "auto_palm", allowOverride: true };
+  const isAuto = mode === "auto_palm";
+  const targetW = isAuto ? vw : 256;
+  const targetH = isAuto ? vh : 256;
+  const side = Math.floor(Math.min(vw, vh) * 0.65);
+  const sx = isAuto ? 0 : Math.floor((vw - side) / 2);
+  const sy = isAuto ? 0 : Math.floor((vh - side) / 2);
+  const sw = isAuto ? vw : side;
+  const sh = isAuto ? vh : side;
+
+  captureCanvas.width = targetW;
+  captureCanvas.height = targetH;
+  const ctx = captureCanvas.getContext("2d", { willReadFrequently: true });
+
+  // Temporal Burst Averaging (5 frames ~140ms) suppresses random CMOS sensor grain.
+  const burstFrames = 5;
+  const acc = new Float32Array(targetW * targetH * 4);
+  for (let i = 0; i < burstFrames; i++) {
+    ctx.drawImage(video, sx, sy, sw, sh, 0, 0, targetW, targetH);
+    const frameData = ctx.getImageData(0, 0, targetW, targetH).data;
+    for (let p = 0; p < frameData.length; p++) {
+      acc[p] += frameData[p];
+    }
+    if (i < burstFrames - 1) {
+      await new Promise((r) => setTimeout(r, 35));
+    }
   }
 
-  captureCanvas.width = 256;
-  captureCanvas.height = 256;
-  const side = Math.floor(Math.min(vw, vh) * 0.65);
-  const sx = Math.floor((vw - side) / 2);
-  const sy = Math.floor((vh - side) / 2);
-  ctx.drawImage(video, sx, sy, side, side, 0, 0, 256, 256);
+  const outImg = ctx.createImageData(targetW, targetH);
+  for (let p = 0; p < acc.length; p++) {
+    outImg.data[p] = Math.round(acc[p] / burstFrames);
+  }
+  ctx.putImageData(outImg, 0, 0);
 
   const blob = await new Promise((resolve) =>
     captureCanvas.toBlob(resolve, "image/png")
   );
-  return { blob, filename: "webcam_roi.png", cropMode: "full", allowOverride: false };
+  return {
+    blob,
+    filename: isAuto ? "webcam_burst_full.png" : "webcam_burst_roi.png",
+    cropMode: isAuto ? "auto_palm" : "full",
+    allowOverride: isAuto,
+  };
 }
 
 document.getElementById("btn-start-cam").addEventListener("click", async () => {
