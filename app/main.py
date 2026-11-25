@@ -5,12 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import config
+from app.net import get_lan_ip
 from app.cv.matcher import (
     MatcherMode,
     MatchResult,
@@ -152,6 +153,21 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     @application.get("/health", tags=["System"])
     async def health() -> dict[str, str]:
         return {"status": "ok", "service": "biopalm-auth"}
+
+    @application.get("/api/network-info", tags=["System"])
+    async def network_info(request: Request) -> dict[str, object]:
+        lan_ip = get_lan_ip()
+        scheme = request.url.scheme or "https"
+        port = request.url.port
+        if port is None:
+            port = 443 if scheme == "https" else 80
+        mobile_url = f"{scheme}://{lan_ip}:{port}/"
+        return {
+            "lan_ip": lan_ip,
+            "scheme": scheme,
+            "port": port,
+            "mobile_url": mobile_url,
+        }
 
     @application.post(
         "/api/pipeline/inspect",

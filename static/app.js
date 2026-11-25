@@ -1,6 +1,7 @@
 const video = document.getElementById("webcam");
 const uploadPreview = document.getElementById("upload-preview");
 const fileInput = document.getElementById("file-input");
+const nativeCameraInput = document.getElementById("native-camera-input");
 const captureCanvas = document.getElementById("capture-canvas");
 const sourceIndicator = document.getElementById("source-indicator");
 const errorBanner = document.getElementById("error-banner");
@@ -97,6 +98,12 @@ async function captureWebcamRoi() {
 
 document.getElementById("btn-start-cam").addEventListener("click", async () => {
   showError("");
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    showError(
+      "Live webcam butuh HTTPS/localhost. Buka lewat https:// atau pakai tombol 'Kamera HP (Native)'."
+    );
+    return;
+  }
   try {
     mediaStream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 960 } },
@@ -153,17 +160,21 @@ useSnapshotInput.addEventListener("change", () => {
   }
 });
 
-fileInput.addEventListener("change", () => {
-  const file = fileInput.files[0];
+function handlePickedImageFile(file) {
   if (!file) return;
   selectedFile = file;
   useSnapshotInput.checked = false;
   uploadPreview.src = URL.createObjectURL(file);
   uploadPreview.hidden = false;
   video.hidden = true;
-  sourceIndicator.textContent = `Sumber: File (${file.name})`;
+  sourceIndicator.textContent = `Sumber: Foto (${file.name || "kamera_hp.jpg"})`;
   showError("");
-});
+}
+
+fileInput.addEventListener("change", () => handlePickedImageFile(fileInput.files[0]));
+nativeCameraInput.addEventListener("change", () =>
+  handlePickedImageFile(nativeCameraInput.files[0])
+);
 
 async function getInputBlobAndCropMode() {
   if (useSnapshotInput.checked && lastSnapshot) {
@@ -445,7 +456,18 @@ document.getElementById("btn-create-vault").addEventListener("click", async () =
   activeVaultSession = data.session_id;
   sessionIdInput.value = data.session_id;
 
-  const url = `${window.location.origin}/?session=${encodeURIComponent(data.session_id)}`;
+  let baseOrigin = window.location.origin;
+  try {
+    const netRes = await fetch("/api/network-info");
+    if (netRes.ok) {
+      const net = await netRes.json();
+      if (net.mobile_url) baseOrigin = net.mobile_url.replace(/\/$/, "");
+    }
+  } catch {
+    // Fallback to current origin if network-info check fails
+  }
+
+  const url = `${baseOrigin}/?session=${encodeURIComponent(data.session_id)}`;
   document.getElementById("vault-sid").textContent = data.session_id;
   const link = document.getElementById("vault-link");
   link.href = url;

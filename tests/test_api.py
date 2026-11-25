@@ -28,6 +28,24 @@ def test_openapi_docs_and_web_ui_available(tmp_path):
     assert client.get("/").status_code == 200
     assert client.get("/health").json()["status"] == "ok"
 
+    net_res = client.get("/api/network-info")
+    assert net_res.status_code == 200
+    assert "mobile_url" in net_res.json()
+
+
+def test_self_signed_cert_generation(tmp_path):
+    from app.net import ensure_self_signed_cert
+
+    cert_path, key_path, ip = ensure_self_signed_cert(tmp_path, lan_ip="192.168.1.50")
+    assert cert_path.exists()
+    assert key_path.exists()
+    assert ip == "192.168.1.50"
+
+    # Reuses existing files when LAN IP matches
+    mtime_before = cert_path.stat().st_mtime_ns
+    cert_path2, _, _ = ensure_self_signed_cert(tmp_path, lan_ip="192.168.1.50")
+    assert cert_path2.stat().st_mtime_ns == mtime_before
+
 
 def test_inspect_enroll_verify_and_vault_flow(tmp_path):
     client = _client(tmp_path)

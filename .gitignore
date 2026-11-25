@@ -182,3 +182,4 @@ cython_debug/
 
 # BioPalm runtime data
 data/
+certs/
