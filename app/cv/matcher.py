@@ -1,4 +1,4 @@
-"""Stage 6 feature matching: Dilated IoU + Shift Alignment + ORB Keypoints."""
+"""Stage 6 feature matching: Soft Line-Map NCC + Dilated IoU + ORB Keypoints."""
 
 from __future__ import annotations
 
@@ -10,22 +10,25 @@ import numpy as np
 
 from app import config
 
-MatcherMode = Literal["dilated_iou", "orb", "hybrid"]
+MatcherMode = Literal["line_ncc", "dilated_iou", "orb", "hybrid"]
 
 
 @dataclass(frozen=True)
 class MatchResult:
-    """Similarity scores, best translation offset, and verification decision."""
+    """Similarity scores, best alignment transform, and verification decision."""
 
     verified: bool
     score: float
+    line_ncc: float
     dilated_iou: float
     dice_f1: float
     hamming_similarity: float
     shift_x: int
     shift_y: int
     reason: str
-    matcher_mode: str = "dilated_iou"
+    matcher_mode: str = "line_ncc"
+    best_angle: float = 0.0
+    best_scale: float = 1.0
     orb_score: float = 0.0
     orb_good_matches: int = 0
 
@@ -102,6 +105,57 @@ def _find_best_alignment(
     return best_dx, best_dy
 
 
+def compute_line_ncc(
+    probe_skeleton: np.ndarray,
+    template_skeleton: np.ndarray,
+    enable_alignment: bool = True,
+) -> tuple[float, int, int, float, float]:
+    """Compute Gaussian-blurred Line-Map NCC across small scale & rotation variations."""
+    k = config.LINE_NCC_BLUR_KSIZE
+    sigma = config.LINE_NCC_BLUR_SIGMA
+    pm = cv2.GaussianBlur((probe_skeleton > 0).astype(np.float32), (k, k), sigma)
+    tm = cv2.GaussianBlur((template_skeleton > 0).astype(np.float32), (k, k), sigma)
+
+    m = config.LINE_NCC_MARGIN
+    h, w = tm.shape
+    tm_crop = tm[m : h - m, m : w - m]
+    if float(np.std(tm_crop)) < 1e-5:
+        m = 0
+        tm_crop = tm
+        if float(np.std(tm_crop)) < 1e-5:
+            return 0.0, 0, 0, 0.0, 1.0
+
+    if not enable_alignment:
+        res = cv2.matchTemplate(pm[m : h - m, m : w - m], tm_crop, cv2.TM_CCOEFF_NORMED)
+        score = float(np.clip(res[0, 0], 0.0, 1.0))
+        return round(score, 4), 0, 0, 0.0, 1.0
+
+    best_score = -1.0
+    best_dx, best_dy = 0, 0
+    best_angle, best_scale = 0.0, 1.0
+    center = (w / 2.0, h / 2.0)
+
+    for sc in config.LINE_NCC_SCALES:
+        for ang in config.LINE_NCC_ANGLES:
+            if sc == 1.0 and ang == 0.0:
+                pw = pm
+            else:
+                mat = cv2.getRotationMatrix2D(center, ang, sc)
+                pw = cv2.warpAffine(pm, mat, (w, h), flags=cv2.INTER_LINEAR)
+
+            res = cv2.matchTemplate(pw, tm_crop, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, max_loc = cv2.minMaxLoc(res)
+            if max_val > best_score:
+                best_score = float(max_val)
+                best_dx = int(m - max_loc[0])
+                best_dy = int(m - max_loc[1])
+                best_angle = float(ang)
+                best_scale = float(sc)
+
+    clamped = round(float(np.clip(best_score, 0.0, 1.0)), 4)
+    return clamped, best_dx, best_dy, best_angle, best_scale
+
+
 def compute_orb_matches(
     probe_gray: np.ndarray,
     template_gray: np.ndarray,
@@ -144,8 +198,7 @@ def compute_orb_matches(
             effective = inliers
 
     effective.sort(key=lambda m: m.distance)
-    denom = max(12.0, min(len(kp1), len(kp2)) * 0.25)
-    orb_score = min(1.0, len(effective) / denom)
+    orb_score = min(1.0, len(effective) / config.ORB_TARGET_INLIERS)
     return round(float(orb_score), 4), len(effective), kp1, kp2, effective
 
 
@@ -161,7 +214,7 @@ def compute_match_score(
     shift_step: int = config.DEFAULT_SHIFT_STEP,
     enable_alignment: bool = True,
 ) -> MatchResult:
-    """Compare probe and template using Dilated IoU, ORB keypoints, or Hybrid fusion."""
+    """Compare probe and template using Line-NCC, Dilated IoU, ORB, or Hybrid fusion."""
     if probe_skeleton.shape != template_skeleton.shape:
         raise ValueError(
             f"Shape mismatch: probe={probe_skeleton.shape} template={template_skeleton.shape}"
@@ -173,11 +226,11 @@ def compute_match_score(
     probe_ratio = float(np.count_nonzero(probe_bin)) / float(probe_bin.size)
     tmpl_ratio = float(np.count_nonzero(tmpl_bin)) / float(tmpl_bin.size)
 
-    # Guard against blank/featureless frames accidentally matching or dividing by zero.
     if probe_ratio < config.MIN_SKELETON_RATIO or tmpl_ratio < config.MIN_SKELETON_RATIO:
         return MatchResult(
             verified=False,
             score=0.0,
+            line_ncc=0.0,
             dilated_iou=0.0,
             dice_f1=0.0,
             hamming_similarity=0.0,
@@ -185,9 +238,13 @@ def compute_match_score(
             shift_y=0,
             reason="insufficient_palm_features",
             matcher_mode=matcher_mode,
-            orb_score=0.0,
-            orb_good_matches=0,
         )
+
+    line_ncc, ncc_dx, ncc_dy, best_angle, best_scale = compute_line_ncc(
+        probe_skeleton=probe_skeleton,
+        template_skeleton=template_skeleton,
+        enable_alignment=enable_alignment,
+    )
 
     k = max(1, dilation_ksize)
     if k > 1:
@@ -222,16 +279,25 @@ def compute_match_score(
         )
 
     effective_mode = matcher_mode
-    if matcher_mode == "orb" and has_grays:
+    out_dx, out_dy = ncc_dx, ncc_dy
+    out_angle, out_scale = best_angle, best_scale
+    if matcher_mode == "line_ncc":
+        score = line_ncc
+    elif matcher_mode == "orb" and has_grays:
         score = orb_score
     elif matcher_mode == "hybrid" and has_grays:
         score = round(
-            config.HYBRID_IOU_WEIGHT * dilated_iou + config.HYBRID_ORB_WEIGHT * orb_score,
+            config.HYBRID_LINE_NCC_WEIGHT * line_ncc + config.HYBRID_ORB_WEIGHT * orb_score,
             4,
         )
+    elif matcher_mode == "hybrid":
+        effective_mode = "line_ncc"
+        score = line_ncc
     else:
         effective_mode = "dilated_iou"
         score = round(dilated_iou, 4)
+        out_dx, out_dy = best_dx, best_dy
+        out_angle, out_scale = 0.0, 1.0
 
     verified = score >= threshold
     reason = "matched" if verified else "below_threshold"
@@ -239,13 +305,16 @@ def compute_match_score(
     return MatchResult(
         verified=verified,
         score=score,
+        line_ncc=line_ncc,
         dilated_iou=round(dilated_iou, 4),
         dice_f1=round(dice_f1, 4),
         hamming_similarity=round(hamming_sim, 4),
-        shift_x=best_dx,
-        shift_y=best_dy,
+        shift_x=out_dx,
+        shift_y=out_dy,
         reason=reason,
         matcher_mode=effective_mode,
+        best_angle=out_angle,
+        best_scale=out_scale,
         orb_score=orb_score,
         orb_good_matches=orb_good,
     )
@@ -257,9 +326,16 @@ def render_alignment_overlay(
     shift_x: int,
     shift_y: int,
     dilation_ksize: int = 3,
+    angle: float = 0.0,
+    scale: float = 1.0,
 ) -> np.ndarray:
-    """Render RGB/BGR overlay: Template=Magenta, Aligned Probe=Cyan, Overlap=White."""
+    """Render BGR overlay: Template=Magenta, Aligned Probe=Cyan, Overlap=White."""
+    h, w = probe_skeleton.shape[:2]
     probe_bin = (probe_skeleton > 0).astype(np.uint8)
+    if angle != 0.0 or scale != 1.0:
+        mat = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), angle, scale)
+        probe_bin = cv2.warpAffine(probe_bin, mat, (w, h), flags=cv2.INTER_NEAREST)
+
     tmpl_bin = (template_skeleton > 0).astype(np.uint8)
 
     vis_k = max(1, min(dilation_ksize, 5))
@@ -276,7 +352,7 @@ def render_alignment_overlay(
     only_probe = aligned_probe & ~tmpl_vis
     only_tmpl = tmpl_vis & ~aligned_probe
 
-    canvas = np.zeros((probe_skeleton.shape[0], probe_skeleton.shape[1], 3), dtype=np.uint8)
+    canvas = np.zeros((h, w, 3), dtype=np.uint8)
     canvas[only_tmpl] = (255, 0, 255)   # BGR Magenta
     canvas[only_probe] = (255, 255, 0)  # BGR Cyan
     canvas[overlap] = (255, 255, 255)   # BGR White

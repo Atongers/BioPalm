@@ -459,6 +459,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 shift_x=best_match.shift_x,
                 shift_y=best_match.shift_y,
                 dilation_ksize=dilation_ksize,
+                angle=best_match.best_angle,
+                scale=best_match.best_scale,
             )
             overlay_b64 = encode_png_b64(overlay_img)
             if best_sample.enhanced_gray is not None:
@@ -473,6 +475,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 score=best_match.score,
                 score_percent=round(best_match.score * 100.0, 2),
                 matcher_mode=best_match.matcher_mode,
+                line_ncc=best_match.line_ncc,
                 dilated_iou=best_match.dilated_iou,
                 dice_f1=best_match.dice_f1,
                 hamming_similarity=best_match.hamming_similarity,
@@ -482,6 +485,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 dilation_ksize=dilation_ksize,
                 shift_x=best_match.shift_x,
                 shift_y=best_match.shift_y,
+                best_angle=best_match.best_angle,
+                best_scale=best_match.best_scale,
                 matched_sample_index=best_sample.sample_index,
                 samples_checked=total_samples_checked,
                 reason=best_match.reason,

@@ -185,7 +185,7 @@ def _select_palm_valleys(
 
 def detect_palm_roi_by_valleys(
     image_bgr: np.ndarray,
-) -> tuple[np.ndarray, str, np.ndarray]:
+) -> tuple[np.ndarray, str, np.ndarray, np.ndarray | None]:
     """Auto-align palm ROI via skin segmentation, finger valleys, and Affine rotation."""
     h, w = image_bgr.shape[:2]
     skin_mask = segment_skin_mask(image_bgr)
@@ -214,7 +214,7 @@ def detect_palm_roi_by_valleys(
             (0, 165, 255),
             2,
         )
-        return fallback_roi, "fallback_center_square", vis
+        return fallback_roi, "fallback_center_square", vis, None
 
     v1, v2, centroid = selection
     if v1[0] > v2[0]:
@@ -234,6 +234,14 @@ def detect_palm_roi_by_valleys(
         flags=cv2.INTER_LINEAR,
         borderMode=cv2.BORDER_REPLICATE,
     )
+    rotated_mask = cv2.warpAffine(
+        skin_mask,
+        rot_mat,
+        (w, h),
+        flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
 
     # Project palm centroid into rotated space to ensure we crop toward the palm side
     rot_centroid_y = (
@@ -241,7 +249,7 @@ def detect_palm_roi_by_valleys(
     )
     palm_below = rot_centroid_y >= mid[1]
 
-    roi_side = int(np.clip(round(valley_dist * 2.1), 64, min(w, h)))
+    roi_side = int(np.clip(round(valley_dist * 2.0), 64, min(w, h)))
     gap = int(round(valley_dist * 0.22))
     x1 = int(np.clip(round(mid[0] - roi_side / 2.0), 0, max(0, w - roi_side)))
     if palm_below:
@@ -249,6 +257,12 @@ def detect_palm_roi_by_valleys(
     else:
         y1 = int(np.clip(round(mid[1] - gap - roi_side), 0, max(0, h - roi_side)))
     roi_bgr = rotated[y1 : y1 + roi_side, x1 : x1 + roi_side]
+    roi_skin = rotated_mask[y1 : y1 + roi_side, x1 : x1 + roi_side]
+
+    erode_k = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (config.SKIN_MASK_ERODE_KSIZE, config.SKIN_MASK_ERODE_KSIZE)
+    )
+    roi_skin_eroded = cv2.erode(roi_skin, erode_k)
 
     # Build diagnostic overlay on original frame showing valleys + tilted ROI box
     vis = image_bgr.copy()
@@ -282,7 +296,7 @@ def detect_palm_roi_by_valleys(
         2,
     )
 
-    return roi_bgr, "finger_valleys", vis
+    return roi_bgr, "finger_valleys", vis, roi_skin_eroded
 
 
 def crop_roi(
@@ -357,6 +371,7 @@ def enhance_and_smooth(
     )
 
     clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=config.CLAHE_TILE_GRID)
+    clahe_raw_for_orb = clahe.apply(median_img)
     clahe_gray = clahe.apply(bilateral_img)
 
     gk = gaussian_ksize if gaussian_ksize % 2 == 1 else gaussian_ksize + 1
@@ -367,11 +382,11 @@ def enhance_and_smooth(
         blackhat = cv2.morphologyEx(clahe_gray, cv2.MORPH_BLACKHAT, bh_kernel)
         if gk >= 3:
             blackhat = cv2.GaussianBlur(blackhat, (gk, gk), 0)
-        return clahe_gray, blackhat
+        return clahe_raw_for_orb, blackhat
 
     if gk >= 3:
-        return clahe_gray, cv2.GaussianBlur(clahe_gray, (gk, gk), 0)
-    return clahe_gray, clahe_gray
+        return clahe_raw_for_orb, cv2.GaussianBlur(clahe_gray, (gk, gk), 0)
+    return clahe_raw_for_orb, clahe_gray
 
 
 def binarize_adaptive(
@@ -510,8 +525,9 @@ def process_palm_image(
 
     bgr = decode_image(image_bytes)
     vis_alignment: np.ndarray | None = None
+    roi_skin_eroded: np.ndarray | None = None
     if crop_mode == "auto_palm":
-        roi_bgr, alignment_method, vis_alignment = detect_palm_roi_by_valleys(bgr)
+        roi_bgr, alignment_method, vis_alignment, roi_skin_eroded = detect_palm_roi_by_valleys(bgr)
     else:
         roi_bgr = crop_roi(bgr, crop_mode=crop_mode, roi_box=roi_box)
         alignment_method = crop_mode
@@ -537,6 +553,17 @@ def process_palm_image(
     binary = binarize_adaptive(
         ridge_input, block_size=block_size, c_val=c_val, use_blackhat=use_blackhat
     )
+    if roi_skin_eroded is not None and np.count_nonzero(roi_skin_eroded) > 0:
+        mask_256 = cv2.resize(
+            roi_skin_eroded,
+            (config.IMAGE_SIZE, config.IMAGE_SIZE),
+            interpolation=cv2.INTER_NEAREST,
+        )
+        binary = cv2.bitwise_and(binary, mask_256)
+    binary[:4, :] = 0
+    binary[-4:, :] = 0
+    binary[:, :4] = 0
+    binary[:, -4:] = 0
 
     # Stage 5: Morphology Opening, Closing, Thinning, and fragment filtering
     cleaned, skeleton = clean_and_thin(binary, min_component_px=min_component_px)

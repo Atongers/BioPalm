@@ -71,7 +71,8 @@
         <label>
           Matcher Mode (Tahap 6)
           <select id="matcher-mode">
-            <option value="hybrid" selected>hybrid (Dilated IoU + ORB Keypoints)</option>
+            <option value="line_ncc" selected>line_ncc (Soft Line Alignment Multi-Skala/Rotasi)</option>
+            <option value="hybrid">hybrid (70% Line NCC + 30% ORB)</option>
             <option value="dilated_iou">dilated_iou (Skeleton Toleran)</option>
             <option value="orb">orb (Keypoint ORB CLAHE)</option>
           </select>
@@ -146,9 +147,9 @@
       </div>
 
       <div class="metrics-row" id="match-metrics">
-        <div><span>Dilated IoU</span><strong id="m-iou">-</strong></div>
+        <div><span>Line NCC / IoU</span><strong id="m-iou">-</strong></div>
         <div><span>ORB Score</span><strong id="m-orb">-</strong></div>
-        <div><span>Shift (dx,dy)</span><strong id="m-shift">-</strong></div>
+        <div><span>Align (dx,dy,°)</span><strong id="m-shift">-</strong></div>
         <div><span>Skeleton Px</span><strong id="m-pixels">-</strong></div>
       </div>
 

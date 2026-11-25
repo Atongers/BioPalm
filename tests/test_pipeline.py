@@ -326,6 +326,23 @@ def test_orb_and_hybrid_matching_modes():
     assert hybrid_diff.verified is False
     assert hybrid_diff.score < hybrid_same.score
 
+    ncc_same = compute_match_score(
+        probe_skeleton=probe_same.skeleton,
+        template_skeleton=enroll_res.skeleton,
+        matcher_mode="line_ncc",
+        threshold=0.80,
+    )
+    ncc_diff = compute_match_score(
+        probe_skeleton=probe_diff.skeleton,
+        template_skeleton=enroll_res.skeleton,
+        matcher_mode="line_ncc",
+        threshold=0.80,
+    )
+    assert ncc_same.verified is True
+    assert ncc_same.score >= 0.80
+    assert ncc_diff.verified is False
+    assert ncc_diff.score < 0.65
+
     vis_orb = render_orb_matches(probe_same.enhanced_gray, enroll_res.enhanced_gray)
     assert vis_orb.shape[0] == 256 and vis_orb.shape[1] == 512
 

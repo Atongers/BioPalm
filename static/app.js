@@ -398,9 +398,9 @@ document.getElementById("btn-verify").addEventListener("click", async () => {
     data.alignment_overlay_b64,
     data.orb_matches_b64
   );
-  document.getElementById("m-iou").textContent = `${(data.match.dilated_iou * 100).toFixed(1)}%`;
+  document.getElementById("m-iou").textContent = `${(data.match.line_ncc * 100).toFixed(1)}% / ${(data.match.dilated_iou * 100).toFixed(0)}%`;
   document.getElementById("m-orb").textContent = `${(data.match.orb_score * 100).toFixed(0)}% (${data.match.orb_good_matches})`;
-  document.getElementById("m-shift").textContent = `(${data.match.shift_x}, ${data.match.shift_y})`;
+  document.getElementById("m-shift").textContent = `(${data.match.shift_x},${data.match.shift_y},${data.match.best_angle}°)`;
 
   if (data.verified) {
     const who = data.matched_user ? `${data.matched_user.display_name} (${data.matched_user.user_id})` : "-";

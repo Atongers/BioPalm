@@ -17,7 +17,8 @@ class QualityMetrics(BaseModel):
 class MatchBreakdown(BaseModel):
     score: float = Field(..., description="Primary verification score (0.0-1.0).")
     score_percent: float = Field(..., description="Verification score percentage (0-100).")
-    matcher_mode: str = "hybrid"
+    matcher_mode: str = "line_ncc"
+    line_ncc: float = 0.0
     dilated_iou: float
     dice_f1: float
     hamming_similarity: float
@@ -27,6 +28,8 @@ class MatchBreakdown(BaseModel):
     dilation_ksize: int
     shift_x: int = 0
     shift_y: int = 0
+    best_angle: float = 0.0
+    best_scale: float = 1.0
     matched_sample_index: int = 0
     samples_checked: int = 1
     reason: str
