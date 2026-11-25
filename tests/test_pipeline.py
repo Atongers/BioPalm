@@ -351,6 +351,7 @@ def test_bilateral_and_otsu_blackhat_suppress_heavy_webcam_pores():
     rng = np.random.default_rng(99)
     enroll_res = process_palm_image(make_synthetic_palm("A"), crop_mode="full")
 
+    # Simulate noisy webcam capture: grain (sigma=10) + 250 skin pores across palm
     raw = cv2.imdecode(
         np.frombuffer(make_synthetic_palm("A"), np.uint8),
         cv2.IMREAD_COLOR,
@@ -364,6 +365,7 @@ def test_bilateral_and_otsu_blackhat_suppress_heavy_webcam_pores():
     assert ok
 
     probe_res = process_palm_image(buf.tobytes(), crop_mode="full", use_blackhat=True)
+    # Skeleton density must stay focused on principal lines, not flooded by pores
     assert probe_res.skeleton_density < 0.05
     match = compute_match_score(
         probe_skeleton=probe_res.skeleton,
@@ -371,4 +373,22 @@ def test_bilateral_and_otsu_blackhat_suppress_heavy_webcam_pores():
     )
     assert match.verified is True
     assert match.score >= 0.80
+
+
+def test_mediapipe_mode_loads_model_and_falls_back_cleanly():
+    from app.cv.mediapipe_roi import _get_detector
+    from app import config
+
+    detector = _get_detector(config.MEDIAPIPE_MODEL_PATH)
+    assert detector is not None
+
+    # Blank image triggers clean fallback chain without crashing
+    res = process_palm_image(make_blank_image(), crop_mode="mediapipe")
+    assert res.alignment_method.startswith("mp_fallback_")
+    assert res.skeleton.shape == (256, 256)
+
+    # Full synthetic hand runs cleanly end-to-end in mediapipe mode
+    hand_res = process_palm_image(make_synthetic_full_hand(10.0, 0.95), crop_mode="mediapipe")
+    assert hand_res.skeleton.shape == (256, 256)
+    assert hand_res.skeleton_pixels > 100
 

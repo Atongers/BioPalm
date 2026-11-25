@@ -7,6 +7,7 @@ DATA_DIR = BASE_DIR / "data"
 TEMPLATES_DIR = DATA_DIR / "templates"
 USERS_FILE = DATA_DIR / "users.json"
 STATIC_DIR = BASE_DIR / "static"
+MEDIAPIPE_MODEL_PATH = BASE_DIR / "models" / "hand_landmarker.task"
 
 # Stage 2: Normalization
 IMAGE_SIZE = 256

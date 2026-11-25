@@ -71,7 +71,7 @@ async function captureWebcamRoi() {
   const vh = video.videoHeight;
   const mode = cropModeSelect.value;
 
-  const isAuto = mode === "auto_palm";
+  const isAuto = mode === "mediapipe" || mode === "auto_palm";
   const targetW = isAuto ? vw : 256;
   const targetH = isAuto ? vh : 256;
   const side = Math.floor(Math.min(vw, vh) * 0.65);
@@ -110,7 +110,7 @@ async function captureWebcamRoi() {
   return {
     blob,
     filename: isAuto ? "webcam_burst_full.png" : "webcam_burst_roi.png",
-    cropMode: isAuto ? "auto_palm" : "full",
+    cropMode: isAuto ? mode : "full",
     allowOverride: isAuto,
   };
 }

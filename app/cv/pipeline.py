@@ -11,8 +11,9 @@ import cv2
 import numpy as np
 
 from app import config
+from app.cv.mediapipe_roi import detect_palm_roi_mediapipe
 
-CropMode = Literal["auto_palm", "center_square", "full", "box"]
+CropMode = Literal["mediapipe", "auto_palm", "center_square", "full", "box"]
 
 
 @dataclass(frozen=True)
@@ -259,6 +260,7 @@ def detect_palm_roi_by_valleys(
     roi_bgr = rotated[y1 : y1 + roi_side, x1 : x1 + roi_side]
     roi_skin = rotated_mask[y1 : y1 + roi_side, x1 : x1 + roi_side]
 
+    # Erode skin mask inside ROI so palm-to-background boundary edges are ignored.
     erode_k = cv2.getStructuringElement(
         cv2.MORPH_ELLIPSE, (config.SKIN_MASK_ERODE_KSIZE, config.SKIN_MASK_ERODE_KSIZE)
     )
@@ -363,6 +365,8 @@ def enhance_and_smooth(
     k = max(3, k)
     median_img = cv2.medianBlur(gray_256, k)
 
+    # Edge-preserving Bilateral Filter suppresses skin pores & CMOS grain
+    # while keeping sharp edges along principal palm lines.
     bilateral_img = cv2.bilateralFilter(
         median_img,
         config.BILATERAL_D,
@@ -371,6 +375,8 @@ def enhance_and_smooth(
     )
 
     clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=config.CLAHE_TILE_GRID)
+    # Preserve un-blurred CLAHE output for ORB keypoint detection;
+    # run Bilateral + CLAHE + Black-Hat for noise-free skeleton extraction.
     clahe_raw_for_orb = clahe.apply(median_img)
     clahe_gray = clahe.apply(bilateral_img)
 
@@ -400,6 +406,7 @@ def binarize_adaptive(
         otsu_thresh, _ = cv2.threshold(
             enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
         )
+        # Enforce minimum ridge floor so flat skin / blank frames stay pure black.
         ridge_floor = max(
             config.BLACKHAT_MIN_FLOOR,
             config.BLACKHAT_MIN_FLOOR + (c_val - config.ADAPTIVE_C),
@@ -510,7 +517,7 @@ def clean_and_thin(
 
 def process_palm_image(
     image_bytes: bytes,
-    crop_mode: CropMode = "auto_palm",
+    crop_mode: CropMode = "mediapipe",
     roi_box: RoiBox | None = None,
     use_blackhat: bool = config.DEFAULT_USE_BLACKHAT,
     clip_limit: float = config.CLAHE_CLIP_LIMIT,
@@ -526,7 +533,16 @@ def process_palm_image(
     bgr = decode_image(image_bytes)
     vis_alignment: np.ndarray | None = None
     roi_skin_eroded: np.ndarray | None = None
-    if crop_mode == "auto_palm":
+    if crop_mode == "mediapipe":
+        mp_res = detect_palm_roi_mediapipe(bgr)
+        if mp_res is not None:
+            roi_bgr, alignment_method, vis_alignment, roi_skin_eroded = mp_res
+        else:
+            roi_bgr, alignment_method, vis_alignment, roi_skin_eroded = (
+                detect_palm_roi_by_valleys(bgr)
+            )
+            alignment_method = f"mp_fallback_{alignment_method}"
+    elif crop_mode == "auto_palm":
         roi_bgr, alignment_method, vis_alignment, roi_skin_eroded = detect_palm_roi_by_valleys(bgr)
     else:
         roi_bgr = crop_roi(bgr, crop_mode=crop_mode, roi_box=roi_box)
@@ -541,7 +557,7 @@ def process_palm_image(
     # Stage 2: Resize 256x256 bilinear
     resized_256 = resize_bilinear(green_roi, size=config.IMAGE_SIZE)
 
-    # Stage 3: Median -> CLAHE -> optional Black-Hat after CLAHE
+    # Stage 3: Median -> Bilateral -> CLAHE -> optional Black-Hat after CLAHE
     enhanced_gray, ridge_input = enhance_and_smooth(
         resized_256,
         clip_limit=clip_limit,
@@ -560,6 +576,7 @@ def process_palm_image(
             interpolation=cv2.INTER_NEAREST,
         )
         binary = cv2.bitwise_and(binary, mask_256)
+    # Trim outer 4-px frame border to suppress edge-gradient artifacts.
     binary[:4, :] = 0
     binary[-4:, :] = 0
     binary[:, :4] = 0
